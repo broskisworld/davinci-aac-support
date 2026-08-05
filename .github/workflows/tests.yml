@@ -1,0 +1,24 @@
+name: tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Install test dependencies
+        run: pip install pytest
+
+      - name: Run Python tests (daemon logic + install.sh sync check)
+        run: python3 -m pytest tests/ -v
+
+      - name: Run install.sh CLI tests
+        run: ./tests/test_install_cli.sh
