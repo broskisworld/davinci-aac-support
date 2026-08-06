@@ -17,10 +17,10 @@ import time
 RESOLVE_SCRIPT_API = "/opt/resolve/Developer/Scripting"
 RESOLVE_SCRIPT_LIB = "/opt/resolve/libs/Fusion/fusionscript.so"
 
-POLL_INTERVAL = float(os.environ.get("RESOLVE_AAC_WATCH_INTERVAL", "3"))
+POLL_INTERVAL = float(os.environ.get("DAVINCI_AAC_SUPPORT_INTERVAL", "3"))
 RECONNECT_INTERVAL = 5
 STATUS_FILE = os.environ.get(
-    "RESOLVE_AAC_STATUS_FILE", os.path.expanduser("~/.cache/resolve-aac-fix/status.json")
+    "DAVINCI_AAC_SUPPORT_STATUS_FILE", os.path.expanduser("~/.cache/davinci-aac-support/status.json")
 )
 NOTIFY = shutil.which("notify-send")
 
@@ -34,7 +34,7 @@ def log(msg):
 
 def notify(title, body):
     if NOTIFY:
-        subprocess.run([NOTIFY, "-a", "Resolve AAC Fix", title, body], check=False)
+        subprocess.run([NOTIFY, "-a", "DaVinci AAC Support", title, body], check=False)
 
 
 def write_status(**fields):
@@ -144,7 +144,7 @@ def process_clip(clip):
     log(f"AAC audio detected: {name}")
 
     if not convert_in_place(path):
-        notify("AAC fix failed", name)
+        notify("AAC Support failed", name)
         return
 
     # Same path in and out -- ReplaceClip still forces Resolve to re-read
@@ -159,7 +159,7 @@ def process_clip(clip):
         write_status(fixed_count=_fixed_count, last_fixed=name)
     else:
         log(f"  ReplaceClip FAILED for {name}")
-        notify("AAC fix failed", f"ReplaceClip rejected {name}")
+        notify("AAC Support failed", f"ReplaceClip rejected {name}")
 
 
 def walk_folder(folder, depth=0):
@@ -183,7 +183,7 @@ def main():
         except Exception:
             pass
 
-    log("resolve-aac-watch starting")
+    log("davinci-aac-support watcher starting")
     write_status(connected=False, fixed_count=_fixed_count)
     resolve = None
     current_project_name = None

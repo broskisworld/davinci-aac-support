@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=DaVinci AAC Support - Installer
+Comment=Installs a background fix for DaVinci Resolve's silent AAC audio import bug
+Icon=multimedia-volume-control
+Terminal=false
+Categories=AudioVideo;
+Exec=bash -c "if [ -f ./install.sh ]; then bash ./install.sh; else curl -fsSL https://raw.githubusercontent.com/broskisworld/davinci-aac-support/main/install.sh | bash; fi"

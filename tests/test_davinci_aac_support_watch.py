@@ -1,4 +1,4 @@
-"""Unit tests for resolve_aac_watch.py's pure logic.
+"""Unit tests for davinci_aac_support_watch.py's pure logic.
 
 Runs without DaVinci Resolve or real ffmpeg/ffprobe installed -- subprocess
 calls are mocked. Only the things that don't need a live Resolve connection
@@ -14,7 +14,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-import resolve_aac_watch as watch  # noqa: E402
+import davinci_aac_support_watch as watch  # noqa: E402
 
 
 @pytest.fixture(autouse=True)

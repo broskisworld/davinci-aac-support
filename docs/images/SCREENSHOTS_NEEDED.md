@@ -5,10 +5,10 @@ this folder with these exact filenames and delete this checklist file.
 
 ## `desktop-file-trust.png`
 
-Right-click on the downloaded `DaVinci-Resolve-AAC-Fix-Installer.desktop`
-file in your file manager, showing the "Allow Launching" (or equivalent
-trust/permissions) option. Crop tightly to just the context menu — no need
-to show the rest of the desktop.
+Right-click on the extracted `davinci-aac-support.desktop` file in your file
+manager, showing the "Allow Launching" (or equivalent trust/permissions)
+option. Crop tightly to just the context menu — no need to show the rest of
+the desktop.
 
 ## `resolve-external-scripting.png`
 

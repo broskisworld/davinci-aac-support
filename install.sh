@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
-# DaVinci Resolve AAC audio auto-fix -- installer
-# =================================================
+# DaVinci AAC Support -- installer
+# =================================
 #
 # Resolve on Linux has no licensed AAC decoder (true for both Free and
 # Studio -- it's a licensing gap, not a missing system codec). Any imported
@@ -18,14 +18,16 @@
 # hand. It runs as a systemd --user service, so it's always on whenever
 # you're logged in, independent of whether Resolve is open yet.
 #
-# This script is self-contained -- copy this one file to another machine
-# and run it, no other files from this repo required.
+# Run this from the extracted zip (it picks up davinci_aac_support_watch.py
+# sitting next to it) or standalone, e.g. via:
+#   curl -fsSL https://raw.githubusercontent.com/broskisworld/davinci-aac-support/main/install.sh | bash
+# (standalone, it fetches the daemon file straight from GitHub instead).
 #
 # Usage:
-#   ./install-aac-fix.sh              Install (or update) the watcher
-#   ./install-aac-fix.sh --status     Check whether it's installed & connected
-#   ./install-aac-fix.sh --uninstall  Remove the service and installed files
-#   ./install-aac-fix.sh -h           Show this help
+#   ./install.sh              Install (or update) the watcher
+#   ./install.sh --status     Check whether it's installed & connected
+#   ./install.sh --uninstall  Remove the service and installed files
+#   ./install.sh -h           Show this help
 #
 # Requirements: Linux, systemd --user, DaVinci Resolve installed at
 # /opt/resolve (Resolve's standard Linux location), ffmpeg/ffprobe
@@ -52,18 +54,21 @@ case "${1:-}" in
     *) echo "Unknown argument: $1" >&2; usage >&2; exit 1 ;;
 esac
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+GITHUB_RAW_BASE="https://raw.githubusercontent.com/broskisworld/davinci-aac-support/main"
+
 BIN_DIR="$HOME/.local/bin"
 SERVICE_DIR="$HOME/.config/systemd/user"
-DAEMON_PATH="$BIN_DIR/resolve_aac_watch.py"
-SERVICE_NAME="davinci-aac-fix.service"
+DAEMON_PATH="$BIN_DIR/davinci_aac_support_watch.py"
+SERVICE_NAME="davinci-aac-support.service"
 SERVICE_PATH="$SERVICE_DIR/$SERVICE_NAME"
-STATE_DIR="$HOME/.cache/resolve-aac-fix"
+STATE_DIR="$HOME/.cache/davinci-aac-support"
 STATUS_FILE="$STATE_DIR/status.json"
 
-# When run via the single-file .desktop package (script piped through
-# "base64 -d | bash"), $0 is just the literal string "bash" -- not a real,
-# re-runnable path. Detect that and fall back to raw systemctl/journalctl
-# commands in any message that would otherwise tell the user to re-run "$0".
+# When run via "curl | bash", $0 is just the literal string "bash" -- not a
+# real, re-runnable path. Detect that and fall back to raw systemctl/
+# journalctl commands in any message that would otherwise tell the user to
+# re-run "$0".
 if [[ -f "${0:-}" ]]; then
     SELF="$0"
 else
@@ -107,10 +112,10 @@ fi
 # completely normal thing to do), and under set -e an unguarded non-zero
 # return here would silently kill the whole installer mid-flow. gui_question
 # deliberately does NOT do this -- its exit code (0=Yes, 1=No) is the point.
-gui_info()     { zenity --info --title="DaVinci Resolve AAC Fix" --text="$1" --width=420 2>/dev/null || true; }
-gui_warn()     { zenity --warning --title="DaVinci Resolve AAC Fix" --text="$1" --width=420 2>/dev/null || true; }
-gui_error()    { zenity --error --title="DaVinci Resolve AAC Fix" --text="$1" --width=420 2>/dev/null || true; }
-gui_question() { zenity --question --title="DaVinci Resolve AAC Fix" --text="$1" --width=420 2>/dev/null; }
+gui_info()     { zenity --info --title="DaVinci AAC Support" --text="$1" --width=420 2>/dev/null || true; }
+gui_warn()     { zenity --warning --title="DaVinci AAC Support" --text="$1" --width=420 2>/dev/null || true; }
+gui_error()    { zenity --error --title="DaVinci AAC Support" --text="$1" --width=420 2>/dev/null || true; }
+gui_question() { zenity --question --title="DaVinci AAC Support" --text="$1" --width=420 2>/dev/null; }
 
 GUI_FIFO=""
 GUI_PID=""
@@ -126,7 +131,7 @@ gui_progress_start() {
     # zenity never sees EOF (confirmed by hanging in testing before this
     # explicit close was added).
     exec 9<> "$GUI_FIFO"
-    zenity --progress --title="DaVinci Resolve AAC Fix" --text="$1" --pulsate --no-cancel --auto-close --width=420 < "$GUI_FIFO" 2>/dev/null 9<&- &
+    zenity --progress --title="DaVinci AAC Support" --text="$1" --pulsate --no-cancel --auto-close --width=420 < "$GUI_FIFO" 2>/dev/null 9<&- &
     GUI_PID=$!
 }
 gui_progress_update() {
@@ -232,236 +237,18 @@ write_files() {
     ui_step "Installing files..."
     mkdir -p "$BIN_DIR" "$SERVICE_DIR" "$STATE_DIR"
 
-    cat > "$DAEMON_PATH" <<'PYDAEMON'
-#!/usr/bin/env python3
-"""Background watcher: auto-fixes AAC audio in DaVinci Resolve's open project.
-
-Polls the current project's Media Pool. Any clip whose audio stream(s) are
-AAC gets remuxed to PCM in place (video stream-copied, untouched) and the
-same Media Pool item is refreshed via MediaPoolItem.ReplaceClip(), which
-preserves its bin location and any timeline placements.
-"""
-import json
-import os
-import shutil
-import subprocess
-import sys
-import tempfile
-import time
-
-RESOLVE_SCRIPT_API = "/opt/resolve/Developer/Scripting"
-RESOLVE_SCRIPT_LIB = "/opt/resolve/libs/Fusion/fusionscript.so"
-
-POLL_INTERVAL = float(os.environ.get("RESOLVE_AAC_WATCH_INTERVAL", "3"))
-RECONNECT_INTERVAL = 5
-STATUS_FILE = os.environ.get(
-    "RESOLVE_AAC_STATUS_FILE", os.path.expanduser("~/.cache/resolve-aac-fix/status.json")
-)
-NOTIFY = shutil.which("notify-send")
-
-_status_cache = {}  # uid -> "clean" | "fixed"
-_fixed_count = 0
-
-
-def log(msg):
-    print(f"[{time.strftime('%H:%M:%S')}] {msg}", flush=True)
-
-
-def notify(title, body):
-    if NOTIFY:
-        subprocess.run([NOTIFY, "-a", "Resolve AAC Fix", title, body], check=False)
-
-
-def write_status(**fields):
-    os.makedirs(os.path.dirname(STATUS_FILE), exist_ok=True)
-    current = {}
-    if os.path.exists(STATUS_FILE):
-        try:
-            with open(STATUS_FILE) as f:
-                current = json.load(f)
-        except Exception:
-            current = {}
-    current.update(fields)
-    current["last_update"] = time.time()
-    tmp = STATUS_FILE + ".tmp"
-    with open(tmp, "w") as f:
-        json.dump(current, f)
-    os.replace(tmp, STATUS_FILE)
-
-
-def _load_resolve_module():
-    # Deferred rather than a top-level import so this module stays importable
-    # (and its pure logic testable) on machines/CI runners without Resolve
-    # installed -- fusionscript.so only needs to exist when we actually try
-    # to connect, not merely to load this file.
-    os.environ.setdefault("RESOLVE_SCRIPT_API", RESOLVE_SCRIPT_API)
-    os.environ.setdefault("RESOLVE_SCRIPT_LIB", RESOLVE_SCRIPT_LIB)
-    modules_path = os.path.join(RESOLVE_SCRIPT_API, "Modules")
-    if modules_path not in sys.path:
-        sys.path.append(modules_path)
-    import DaVinciResolveScript as dvr
-    return dvr
-
-
-def connect_resolve():
-    dvr = _load_resolve_module()
-    resolve = dvr.scriptapp("Resolve")
-    if resolve is None:
-        return None
-    try:
-        resolve.GetProductName()
-    except Exception:
-        return None
-    return resolve
-
-
-def has_aac_audio(path):
-    try:
-        out = subprocess.run(
-            ["ffprobe", "-v", "error", "-select_streams", "a",
-             "-show_entries", "stream=codec_name", "-of", "csv=p=0", path],
-            capture_output=True, text=True, timeout=30,
-        )
-    except Exception as e:
-        log(f"  ffprobe failed on {path}: {e}")
-        return False
-    codecs = [c.strip() for c in out.stdout.splitlines() if c.strip()]
-    return "aac" in codecs
-
-
-def convert_in_place(path):
-    # ffmpeg can't read and write the same path at once, so this converts to
-    # a temp file in the SAME directory as the source (same filesystem, so
-    # the final swap is an atomic rename, not a copy) and replaces the
-    # original on success. No separate copy is left behind either way.
-    directory = os.path.dirname(path) or "."
-    ext = os.path.splitext(path)[1]
-    try:
-        fd, tmp_path = tempfile.mkstemp(dir=directory, suffix=ext)
-        os.close(fd)
-    except OSError as e:
-        log(f"  can't write alongside source, skipping (read-only mount?): {e}")
-        return False
-
-    log(f"  converting in place: {path}")
-    t0 = time.time()
-    result = subprocess.run(
-        ["ffmpeg", "-y", "-i", path, "-map", "0",
-         "-c", "copy", "-c:a", "pcm_s16le", tmp_path],
-        capture_output=True, text=True,
-    )
-    if result.returncode != 0:
-        log(f"  ffmpeg FAILED ({time.time()-t0:.0f}s): {result.stderr[-800:]}")
-        os.remove(tmp_path)
-        return False
-
-    os.replace(tmp_path, path)
-    log(f"  converted in place in {time.time()-t0:.0f}s")
-    return True
-
-
-def process_clip(clip):
-    global _fixed_count
-    uid = clip.GetUniqueId()
-    status = _status_cache.get(uid)
-    if status in ("clean", "fixed"):
-        return
-
-    path = clip.GetClipProperty("File Path")
-    if not path or not os.path.isfile(path):
-        return
-
-    if not has_aac_audio(path):
-        _status_cache[uid] = "clean"
-        return
-
-    name = clip.GetClipProperty("File Name") or os.path.basename(path)
-    log(f"AAC audio detected: {name}")
-
-    if not convert_in_place(path):
-        notify("AAC fix failed", name)
-        return
-
-    # Same path in and out -- ReplaceClip still forces Resolve to re-read
-    # the file's metadata (confirmed live: Audio Codec property flips from
-    # "AAC" to "Linear PCM" after this call), which is what actually clears
-    # the stale blank-audio state in the Media Pool.
-    if clip.ReplaceClip(path):
-        log(f"  refreshed in Media Pool: {name}")
-        notify("AAC audio fixed", name)
-        _status_cache[uid] = "fixed"
-        _fixed_count += 1
-        write_status(fixed_count=_fixed_count, last_fixed=name)
-    else:
-        log(f"  ReplaceClip FAILED for {name}")
-        notify("AAC fix failed", f"ReplaceClip rejected {name}")
-
-
-def walk_folder(folder, depth=0):
-    if depth > 25:
-        return
-    for clip in folder.GetClipList():
-        try:
-            process_clip(clip)
-        except Exception as e:
-            log(f"  error processing clip: {e}")
-    for sub in folder.GetSubFolderList():
-        walk_folder(sub, depth + 1)
-
-
-def main():
-    global _fixed_count
-    if os.path.exists(STATUS_FILE):
-        try:
-            with open(STATUS_FILE) as f:
-                _fixed_count = json.load(f).get("fixed_count", 0)
-        except Exception:
-            pass
-
-    log("resolve-aac-watch starting")
-    write_status(connected=False, fixed_count=_fixed_count)
-    resolve = None
-    current_project_name = None
-    while True:
-        if resolve is None:
-            resolve = connect_resolve()
-            if resolve is None:
-                write_status(connected=False)
-                time.sleep(RECONNECT_INTERVAL)
-                continue
-            product = resolve.GetProductName()
-            version = resolve.GetVersionString()
-            log(f"connected to {product} {version}")
-            write_status(connected=True, product=product, version=version)
-
-        try:
-            pm = resolve.GetProjectManager()
-            project = pm.GetCurrentProject()
-            if project is None:
-                write_status(connected=True, project=None)
-                time.sleep(POLL_INTERVAL)
-                continue
-
-            name = project.GetName()
-            if name != current_project_name:
-                log(f"active project: {name}")
-                current_project_name = name
-            write_status(connected=True, project=name)
-
-            root = project.GetMediaPool().GetRootFolder()
-            walk_folder(root)
-        except Exception as e:
-            log(f"lost connection to Resolve ({e}); will retry")
-            write_status(connected=False)
-            resolve = None
-            current_project_name = None
-
-        time.sleep(POLL_INTERVAL)
-
-
-if __name__ == "__main__":
-    main()
-PYDAEMON
+    # The daemon is a normal sibling file in this repo/zip, not embedded --
+    # copy it if it's sitting next to this script (the common case: cloned
+    # repo or extracted zip), otherwise fetch it fresh (the "curl | bash"
+    # case, where there is no sibling file to find).
+    local daemon_source="$SCRIPT_DIR/davinci_aac_support_watch.py"
+    if [[ -f "$daemon_source" ]]; then
+        cp "$daemon_source" "$DAEMON_PATH"
+    else
+        if ! curl -fsSL "$GITHUB_RAW_BASE/davinci_aac_support_watch.py" -o "$DAEMON_PATH"; then
+            ui_fail "Couldn't fetch davinci_aac_support_watch.py from GitHub and no local copy was found next to install.sh."
+        fi
+    fi
     chmod +x "$DAEMON_PATH"
     ui_ok "Watcher script installed"
 
@@ -619,7 +406,7 @@ do_install() {
     if [[ $GUI -eq 1 ]]; then
         gui_progress_start "Starting installer..."
     else
-        step "DaVinci Resolve AAC-fix -- install"
+        step "DaVinci AAC Support -- install"
     fi
     [[ "$(uname -s)" == "Linux" ]] || ui_fail "This installer only supports Linux."
     check_resolve
@@ -633,7 +420,7 @@ do_install() {
 }
 
 do_status() {
-    step "DaVinci Resolve AAC-fix -- status"
+    step "DaVinci AAC Support -- status"
     if [[ ! -f "$SERVICE_PATH" ]]; then
         if [[ -n "$SELF" ]]; then
             warn "Not installed. Run: $SELF"
@@ -676,7 +463,7 @@ PYSTATUS
 }
 
 do_uninstall() {
-    step "Uninstalling DaVinci Resolve AAC-fix"
+    step "Uninstalling DaVinci AAC Support"
     read -rp "  Remove the service and installed files? [y/N] " REPLY
     if [[ ! "$REPLY" =~ ^[Yy]$ ]]; then
         echo "  Cancelled."

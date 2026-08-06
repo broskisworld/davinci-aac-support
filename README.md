@@ -1,4 +1,4 @@
-# DaVinci Resolve AAC Audio Fix
+# DaVinci AAC Support
 
 Fixes a specific, well-known DaVinci Resolve bug on Linux: import a video with
 AAC audio (most phone and camera footage) and the clip comes in with a
@@ -9,9 +9,9 @@ This installs a small background watcher that detects it and fixes it
 automatically, in place, within a few seconds of import. No manual conversion,
 no re-importing, no editing workflow changes.
 
-[![tests](https://github.com/broskisworld/davinci-resolve-aac-fix/actions/workflows/tests.yml/badge.svg)](https://github.com/broskisworld/davinci-resolve-aac-fix/actions/workflows/tests.yml)
+[![tests](https://github.com/broskisworld/davinci-aac-support/actions/workflows/tests.yml/badge.svg)](https://github.com/broskisworld/davinci-aac-support/actions/workflows/tests.yml)
 
-**[→ davinci-aac-fix.0thdraft.com](https://davinci-aac-fix.0thdraft.com)** — same explanation, prettier page.
+**[→ davinci-aac-support.0thdraft.com](https://davinci-aac-support.0thdraft.com)** — same explanation, prettier page.
 
 ---
 
@@ -64,22 +64,26 @@ back them up first.
 
 ## Install
 
-### Option A — one file, no terminal
+### Option A — download, no terminal
 
-1. Download **[`DaVinci-Resolve-AAC-Fix-Installer.desktop`](DaVinci-Resolve-AAC-Fix-Installer.desktop)**.
-2. Double-click it. The first time you run any downloaded executable, Linux
-   requires one small trust step — right-click → **Allow Launching** (exact
-   wording varies by desktop environment):
+1. Download **[`davinci-aac-support.zip`](davinci-aac-support.zip)** and extract it.
+2. Double-click **`davinci-aac-support.desktop`** inside the extracted folder.
+   The first time you run any downloaded executable, Linux requires one small
+   trust step — right-click → **Allow Launching** (exact wording varies by
+   desktop environment):
 
    ![Right-click "Allow Launching" on the downloaded file](docs/images/desktop-file-trust.png)
 
 3. A short setup wizard walks you through the rest, including the one manual
    step below.
 
+The launcher just runs `install.sh` from the same folder — open it in a text
+editor first if you want to see exactly what it does before running it.
+
 ### Option B — terminal
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/broskisworld/davinci-resolve-aac-fix/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/broskisworld/davinci-aac-support/main/install.sh | bash
 ```
 
 or clone the repo and run `./install.sh` directly.
@@ -115,7 +119,7 @@ few seconds. A couple of commands if you want to check on it:
 ```bash
 ./install.sh --status       # is it connected, what's it fixed so far
 ./install.sh --uninstall    # removes the service and installed files
-journalctl --user -u davinci-aac-fix.service -f   # live logs
+journalctl --user -u davinci-aac-support.service -f   # live logs
 ```
 
 ## How it works
@@ -123,7 +127,7 @@ journalctl --user -u davinci-aac-fix.service -f   # live logs
 <details>
 <summary>Technical details</summary>
 
-- `resolve_aac_watch.py` connects to a running Resolve instance via
+- `davinci_aac_support_watch.py` connects to a running Resolve instance via
   Blackmagic's official `DaVinciResolveScript` API and polls the current
   project's Media Pool every few seconds.
 - For each clip, it checks the actual audio codec with `ffprobe` (not
@@ -143,24 +147,31 @@ journalctl --user -u davinci-aac-fix.service -f   # live logs
 There's no event hook for "clip imported" in Resolve's scripting API on
 Linux (checked) — polling is the only mechanism available, hence the small
 delay after import rather than instant.
+
+**Why a zip instead of one embedded file:** an earlier version packed
+everything into a single `.desktop` file with the installer base64-encoded
+into its `Exec=` line, so it'd be one downloadable file. That's unreadable at
+a glance, which matters for something that runs on your machine — so
+`install.sh` now ships as a plain, readable script, with the daemon as an
+ordinary sibling file next to it (not embedded). The `.desktop` launcher just
+calls `install.sh`, in the clear.
 </details>
 
 ## Development
 
 ```bash
-python3 -m pytest tests/          # daemon logic + sync checks
+python3 -m pytest tests/          # daemon logic + zip contents check
 ./tests/test_install_cli.sh       # install.sh argument parsing etc.
 ```
 
-`resolve_aac_watch.py` is the source of truth for the daemon. `install.sh`
-embeds a copy of it (so it stays a single portable file with no sibling-file
-dependency), and `DaVinci-Resolve-AAC-Fix-Installer.desktop` embeds a copy of
-`install.sh` the same way. After editing the daemon:
+`davinci_aac_support_watch.py` and `install.sh` are both plain source files —
+nothing is generated or embedded between them. `davinci-aac-support.zip` is
+the one generated artifact (see `build-release-zip.sh`); rebuild it after
+changing any packaged file:
 
 ```bash
-./sync-daemon.sh                  # regenerates install.sh's embedded copy
-./build-single-file-installer.sh  # regenerates the .desktop bundle
-python3 -m pytest tests/          # confirms all three are back in sync
+./build-release-zip.sh
+python3 -m pytest tests/          # confirms the zip matches the source files
 ```
 
 CI (`.github/workflows/tests.yml`) runs the full suite on every push.
