@@ -22,3 +22,15 @@ jobs:
 
       - name: Run install.sh CLI tests
         run: ./tests/test_install_cli.sh
+
+  distro-matrix:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        distro: [fedora, arch, debian]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify check_deps() on ${{ matrix.distro }} (real container, real package manager)
+        run: ./docker/run-distro-tests.sh ${{ matrix.distro }}

@@ -194,7 +194,12 @@ changing any packaged file:
 python3 -m pytest tests/          # confirms the zip matches the source files
 ```
 
-CI (`.github/workflows/tests.yml`) runs the full suite on every push.
+CI (`.github/workflows/tests.yml`) runs the full suite on every push, plus a
+Fedora/Arch/Debian matrix that actually installs ffmpeg through each distro's
+real package manager in a container (`docker/run-distro-tests.sh` — also
+runnable locally, `./docker/run-distro-tests.sh` or with specific distros
+as args). Not just read-and-assume: this caught a real bug where the pacman
+branch needed a sync step it wasn't doing.
 
 ## License
 
