@@ -223,7 +223,7 @@ check_deps() {
     elif command -v dnf >/dev/null 2>&1; then
         inner_cmd="dnf install -y ffmpeg"
     elif command -v pacman >/dev/null 2>&1; then
-        inner_cmd="pacman -S --noconfirm ffmpeg"
+        inner_cmd="pacman -Sy --noconfirm ffmpeg"
     elif command -v zypper >/dev/null 2>&1; then
         inner_cmd="zypper install -y ffmpeg"
     else
@@ -248,7 +248,7 @@ check_deps() {
         if ! sudo bash -c "$inner_cmd"; then
             local extra=""
             if command -v dnf >/dev/null 2>&1; then
-                extra="\nOn Fedora, ffmpeg isn't in the default repos -- you likely need RPM Fusion:\nhttps://rpmfusion.org/Configuration"
+                extra="\nOn Fedora, ffmpeg installs from the default repos on current releases -- if this failed, check your network/mirror first. On older releases it may still need RPM Fusion:\nhttps://rpmfusion.org/Configuration"
             fi
             ui_fail "Package install failed.$extra"
         fi

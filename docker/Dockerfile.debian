@@ -1,0 +1,22 @@
+# Verification container for install.sh's apt-get branch of check_deps().
+#
+# debian:bookworm-slim (confirmed empirically) ships bash and apt-get out
+# of the box, but NOT curl -- install.sh needs curl itself when run
+# standalone via `curl | bash` (to fetch the daemon .py file from GitHub,
+# see write_files() around line 248), so a real minimal Debian desktop
+# user hitting that path would need it too. Installed here so this image
+# mimics that starting state rather than a container-only artifact.
+FROM debian:bookworm-slim
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends bash curl ca-certificates && \
+    rm -rf /var/lib/apt/lists/*
+
+WORKDIR /work
+# Build context is the repo root (see docker/run-distro-tests.sh) so this
+# picks up the real install.sh under test, not a copy.
+COPY install.sh /work/install.sh
+COPY docker/check-deps-harness.sh /work/check-deps-harness.sh
+RUN chmod +x /work/check-deps-harness.sh
+
+ENTRYPOINT ["/work/check-deps-harness.sh", "/work/install.sh"]

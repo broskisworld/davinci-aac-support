@@ -1,0 +1,27 @@
+# Verification container for install.sh's pacman branch of check_deps().
+#
+# archlinux:latest (confirmed empirically) already ships bash, curl,
+# pacman AND systemctl out of the box -- unlike Fedora/Debian's slimmed
+# container bases, Arch's base image is close to a real minimal install
+# in this respect. Nothing extra needs installing before exercising
+# check_deps().
+#
+# NOTE: this base image's local pacman database (/var/lib/pacman/sync) is
+# empty/unsynced on first boot. install.sh's pacman branch runs plain
+# `pacman -S --noconfirm ffmpeg` with no preceding `-Sy`/`-Syu` -- on a
+# freshly provisioned system (this container, and plausibly a fresh Arch
+# install that hasn't been pacman -Syu'd yet) that fails with "target not
+# found: ffmpeg" because there's no synced package database to resolve
+# the name against. See docker/run-distro-tests.sh output and the written
+# report for the confirmed repro and fix (`pacman -Sy --noconfirm ffmpeg`
+# works). Not fixed here since install.sh isn't touched by this change.
+FROM archlinux:latest
+
+WORKDIR /work
+# Build context is the repo root (see docker/run-distro-tests.sh) so this
+# picks up the real install.sh under test, not a copy.
+COPY install.sh /work/install.sh
+COPY docker/check-deps-harness.sh /work/check-deps-harness.sh
+RUN chmod +x /work/check-deps-harness.sh
+
+ENTRYPOINT ["/work/check-deps-harness.sh", "/work/install.sh"]
