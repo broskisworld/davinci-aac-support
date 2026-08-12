@@ -22,6 +22,10 @@ RECONNECT_INTERVAL = 5
 STATUS_FILE = os.environ.get(
     "DAVINCI_AAC_SUPPORT_STATUS_FILE", os.path.expanduser("~/.cache/davinci-aac-support/status.json")
 )
+EVENTS_FILE = os.environ.get(
+    "DAVINCI_AAC_SUPPORT_EVENTS_FILE", os.path.expanduser("~/.cache/davinci-aac-support/events.jsonl")
+)
+EVENTS_MAX_LINES = 200
 NOTIFY = shutil.which("notify-send")
 
 _status_cache = {}  # uid -> "clean" | "fixed"
@@ -30,6 +34,24 @@ _fixed_count = 0
 
 def log(msg):
     print(f"[{time.strftime('%H:%M:%S')}] {msg}", flush=True)
+
+
+def emit_event(kind, text):
+    # Feeds the live monitor (davinci_aac_support_ui.py) via a plain
+    # append-only JSONL file it tails -- kept short since it's just a
+    # recent-activity feed, not an audit log.
+    os.makedirs(os.path.dirname(EVENTS_FILE), exist_ok=True)
+    line = json.dumps({"type": "event", "kind": kind, "text": text, "time": time.time()})
+    try:
+        with open(EVENTS_FILE, "a") as f:
+            f.write(line + "\n")
+        with open(EVENTS_FILE) as f:
+            lines = f.readlines()
+        if len(lines) > EVENTS_MAX_LINES:
+            with open(EVENTS_FILE, "w") as f:
+                f.writelines(lines[-EVENTS_MAX_LINES:])
+    except Exception:
+        pass  # the live feed is a nice-to-have, never worth crashing the watcher over
 
 
 def notify(title, body):
@@ -142,9 +164,12 @@ def process_clip(clip):
 
     name = clip.GetClipProperty("File Name") or os.path.basename(path)
     log(f"AAC audio detected: {name}")
+    emit_event("detected", f"AAC audio detected: {name}")
 
+    emit_event("converting", f"Converting in place: {name}")
     if not convert_in_place(path):
         notify("AAC Support failed", name)
+        emit_event("failed", f"Conversion failed: {name}")
         return
 
     # Same path in and out -- ReplaceClip still forces Resolve to re-read
@@ -154,12 +179,14 @@ def process_clip(clip):
     if clip.ReplaceClip(path):
         log(f"  refreshed in Media Pool: {name}")
         notify("AAC audio fixed", name)
+        emit_event("fixed", f"Fixed: {name}")
         _status_cache[uid] = "fixed"
         _fixed_count += 1
         write_status(fixed_count=_fixed_count, last_fixed=name)
     else:
         log(f"  ReplaceClip FAILED for {name}")
         notify("AAC Support failed", f"ReplaceClip rejected {name}")
+        emit_event("failed", f"Resolve rejected the refresh: {name}")
 
 
 def walk_folder(folder, depth=0):

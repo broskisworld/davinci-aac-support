@@ -16,6 +16,7 @@ ZIP_PATH = os.path.join(REPO_ROOT, "davinci-aac-support.zip")
 PACKAGED_FILES = [
     "install.sh",
     "davinci_aac_support_watch.py",
+    "davinci_aac_support_ui.py",
     "davinci-aac-support.desktop",
     "README.md",
     "LICENSE",

@@ -60,10 +60,14 @@ GITHUB_RAW_BASE="https://raw.githubusercontent.com/broskisworld/davinci-aac-supp
 BIN_DIR="$HOME/.local/bin"
 SERVICE_DIR="$HOME/.config/systemd/user"
 DAEMON_PATH="$BIN_DIR/davinci_aac_support_watch.py"
+UI_PATH="$BIN_DIR/davinci_aac_support_ui.py"
+MONITOR_PATH="$BIN_DIR/davinci-aac-support-monitor"
 SERVICE_NAME="davinci-aac-support.service"
 SERVICE_PATH="$SERVICE_DIR/$SERVICE_NAME"
 STATE_DIR="$HOME/.cache/davinci-aac-support"
 STATUS_FILE="$STATE_DIR/status.json"
+INSTALL_LOG="$STATE_DIR/install-log.jsonl"
+PORT_FILE="$STATE_DIR/ui-port.txt"
 
 # When run via "curl | bash", $0 is just the literal string "bash" -- not a
 # real, re-runnable path. Detect that and fall back to raw systemctl/
@@ -100,62 +104,84 @@ err()  { printf "  %s\xe2\x9c\x98%s %s\n" "$C_RED" "$C_RESET" "$1" >&2; }
 step() { printf "\n%s%s%s\n" "${C_BOLD}${C_CYAN}" "$1" "$C_RESET"; }
 
 # GUI mode: launched with no controlling terminal (e.g. double-clicked via a
-# .desktop launcher) and zenity available -- drive everything through native
-# dialogs instead of terminal output.
+# .desktop launcher) -- drive everything through a local web dashboard
+# (davinci_aac_support_ui.py) opened in the default browser, instead of
+# terminal output. No GUI-toolkit dependency (zenity, kdialog, ...) needed
+# for this at all -- a browser doesn't care which desktop environment or
+# toolkit is installed, which is exactly what makes this portable.
 GUI=0
-if [[ ! -t 1 ]] && command -v zenity >/dev/null 2>&1; then
+if [[ ! -t 1 ]]; then
     GUI=1
 fi
 
-# || true on the fire-and-forget dialogs: zenity returns non-zero if the
-# user closes them via the window's X button instead of the OK button (a
-# completely normal thing to do), and under set -e an unguarded non-zero
-# return here would silently kill the whole installer mid-flow. gui_question
-# deliberately does NOT do this -- its exit code (0=Yes, 1=No) is the point.
-gui_info()     { zenity --info --title="DaVinci AAC Support" --text="$1" --width=420 2>/dev/null || true; }
-gui_warn()     { zenity --warning --title="DaVinci AAC Support" --text="$1" --width=420 2>/dev/null || true; }
-gui_error()    { zenity --error --title="DaVinci AAC Support" --text="$1" --width=420 2>/dev/null || true; }
-gui_question() { zenity --question --title="DaVinci AAC Support" --text="$1" --width=420 2>/dev/null; }
+UI_SERVER_PID=""
 
-GUI_FIFO=""
-GUI_PID=""
-gui_progress_start() {
-    GUI_FIFO=$(mktemp -u)
-    mkfifo "$GUI_FIFO"
-    # fd 9 is opened read-write so the parent's open(2) never blocks waiting
-    # for a reader. zenity reads via its own plain redirect on the fifo path
-    # (not a dup of fd 9), and the trailing "9<&-" closes the *subshell's*
-    # inherited copy of fd 9 -- background jobs fork with all parent fds
-    # intact, so without this, that inherited copy keeps the fifo's write
-    # end alive even after gui_progress_stop closes fd 9 in the parent, and
-    # zenity never sees EOF (confirmed by hanging in testing before this
-    # explicit close was added).
-    exec 9<> "$GUI_FIFO"
-    zenity --progress --title="DaVinci AAC Support" --text="$1" --pulsate --no-cancel --auto-close --width=420 < "$GUI_FIFO" 2>/dev/null 9<&- &
-    GUI_PID=$!
-}
-gui_progress_update() {
-    echo "# $1" >&9 2>/dev/null || true
-}
-gui_progress_stop() {
-    if [[ -n "$GUI_PID" ]]; then
-        exec 9>&- 2>/dev/null || true
-        exec 9<&- 2>/dev/null || true
-        wait "$GUI_PID" 2>/dev/null || true
-        GUI_PID=""
+start_ui_server() {
+    mkdir -p "$STATE_DIR"
+    : > "$INSTALL_LOG"
+    rm -f "$PORT_FILE"
+
+    local ui_source="$SCRIPT_DIR/davinci_aac_support_ui.py"
+    local ui_script="$ui_source"
+    if [[ ! -f "$ui_source" ]]; then
+        ui_script="$STATE_DIR/davinci_aac_support_ui.py"
+        curl -fsSL "$GITHUB_RAW_BASE/davinci_aac_support_ui.py" -o "$ui_script" || return 1
     fi
-    [[ -n "$GUI_FIFO" && -e "$GUI_FIFO" ]] && rm -f "$GUI_FIFO"
-    GUI_FIFO=""
+
+    python3 "$ui_script" --mode install >/dev/null 2>&1 &
+    UI_SERVER_PID=$!
+
+    local waited=0
+    while [[ ! -f "$PORT_FILE" ]] && (( waited < 50 )); do
+        sleep 0.1
+        waited=$((waited + 1))
+    done
+}
+
+# Appends one structured line to the install log that the dashboard page
+# streams live via SSE. Shelling out to python per line (rather than
+# hand-building JSON in bash) avoids fragile manual escaping of the
+# messages below, several of which contain quotes and newlines.
+gui_log() {  # $1=type $2=text $3=id(optional, for "ask")
+    python3 - "$INSTALL_LOG" "$1" "$2" "${3:-}" <<'PYEOF'
+import json, sys
+log_path, kind, text, extra_id = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+obj = {"type": kind, "text": text}
+if extra_id:
+    obj["id"] = extra_id
+with open(log_path, "a") as f:
+    f.write(json.dumps(obj) + "\n")
+PYEOF
+}
+gui_log_step() { gui_log step "$1"; }
+gui_log_ok()   { gui_log ok "$1"; }
+gui_log_fail() { gui_log fail "$1"; }
+
+# $1=id $2=text -- posts a yes/no prompt to the page and blocks (up to 5m)
+# until the user clicks one of the buttons there. 0=yes, 1=no/timeout.
+gui_ask() {
+    local id="$1" text="$2" answer_file="$STATE_DIR/answer-$1.txt"
+    rm -f "$answer_file"
+    gui_log ask "$text" "$id"
+    local waited=0
+    while [[ ! -f "$answer_file" ]] && (( waited < 300 )); do
+        sleep 1
+        waited=$((waited + 1))
+    done
+    [[ -f "$answer_file" ]] || return 1
+    local answer
+    answer="$(cat "$answer_file")"
+    rm -f "$answer_file"
+    [[ "$answer" == "yes" ]]
 }
 
 # ui_* wrap the step/ok/err/exit pattern so the same check functions drive
-# either terminal output or the GUI progress dialog depending on $GUI.
-ui_step() { if [[ $GUI -eq 1 ]]; then gui_progress_update "$1"; else step "$1"; fi; }
-ui_ok()   { if [[ $GUI -eq 1 ]]; then gui_progress_update "$1"; else ok "$1"; fi; }
+# either terminal output or the dashboard log depending on $GUI.
+ui_step() { if [[ $GUI -eq 1 ]]; then gui_log_step "$1"; else step "$1"; fi; }
+ui_ok()   { if [[ $GUI -eq 1 ]]; then gui_log_ok "$1"; else ok "$1"; fi; }
 ui_fail() {
     if [[ $GUI -eq 1 ]]; then
-        gui_progress_stop
-        gui_error "$1"
+        gui_log_fail "$1"
     else
         err "$1"
     fi
@@ -205,11 +231,10 @@ check_deps() {
     fi
 
     if [[ $GUI -eq 1 ]]; then
-        gui_progress_stop
-        if ! gui_question "ffmpeg is required to fix AAC audio and wasn't found.\n\nInstall it now? You'll be asked for your password."; then
+        if ! gui_ask "ffmpeg-install" "ffmpeg is required to fix AAC audio and wasn't found. Install it now? You'll be asked for your password."; then
             ui_fail "ffmpeg is required. Cancelled."
         fi
-        gui_progress_start "Installing ffmpeg (this can take a minute)..."
+        gui_log_step "Installing ffmpeg (this can take a minute)..."
         if ! pkexec bash -c "$inner_cmd"; then
             ui_fail "ffmpeg install failed or the password prompt was cancelled."
         fi
@@ -251,6 +276,24 @@ write_files() {
     fi
     chmod +x "$DAEMON_PATH"
     ui_ok "Watcher script installed"
+
+    local ui_source="$SCRIPT_DIR/davinci_aac_support_ui.py"
+    if [[ -f "$ui_source" ]]; then
+        cp "$ui_source" "$UI_PATH"
+    else
+        if ! curl -fsSL "$GITHUB_RAW_BASE/davinci_aac_support_ui.py" -o "$UI_PATH"; then
+            ui_fail "Couldn't fetch davinci_aac_support_ui.py from GitHub and no local copy was found next to install.sh."
+        fi
+    fi
+    chmod +x "$UI_PATH"
+    ui_ok "Dashboard installed"
+
+    cat > "$MONITOR_PATH" <<MONEOF
+#!/usr/bin/env bash
+exec python3 "$UI_PATH" --mode monitor
+MONEOF
+    chmod +x "$MONITOR_PATH"
+    ui_ok "Live monitor installed: davinci-aac-support-monitor"
 
     cat > "$SERVICE_PATH" <<UNITEOF
 [Unit]
@@ -354,34 +397,28 @@ EOF
 }
 
 confirm_connection_gui() {
-    gui_info "The watcher can't connect until Resolve's external scripting API is turned on (it's off by default).\n\nIn Resolve:\nPreferences -> search box -> type \"scripting\"\n(or: Preferences -> System tab -> General)\n-> \"External scripting using\" -> Local -> Save\n\nClick OK once you've done that (with Resolve running and a project open)."
+    gui_log_step 'One manual step in DaVinci Resolve: Preferences -> search "scripting" -> External scripting using -> Local -> Save. The status above updates live, so you will see it connect here as soon as that is saved.'
 
-    gui_progress_start "Waiting for connection to DaVinci Resolve..."
     local waited=0
     local result=""
     while (( waited < 40 )); do
         result="$(check_connection_now)"
         [[ -n "$result" ]] && break
-        gui_progress_update "Waiting for connection to DaVinci Resolve... (${waited}s)"
         sleep 1
         waited=$((waited + 1))
     done
-    gui_progress_stop
 
     if [[ -n "$result" ]]; then
         local prod="${result%%|*}"
-        local proj="${result##*|}"
-        local msg="Connected to $prod"
-        [[ -n "$proj" ]] && msg="$msg\nWatching project: $proj"
-        gui_info "$msg"
+        gui_log_ok "Connected to $prod"
     else
-        gui_warn "Didn't see a connection after 40s.\n\nThe background service is still running and will keep retrying -- it'll pick up the connection whenever the setting is saved and a project is open.\n\nCheck any time by running from a terminal:\n$(self_status_hint)"
+        gui_log_step "Still waiting -- this page keeps checking, so it'll update the moment the setting is saved. No need to keep this window open if you'd rather come back to it later; the watcher itself runs in the background regardless."
     fi
 }
 
 print_summary() {
     if [[ $GUI -eq 1 ]]; then
-        gui_info "Installed.\n\nWatcher: $DAEMON_PATH\nService: $SERVICE_NAME (enabled, starts at login)\n\nFrom here on: just import AAC-audio clips into Resolve normally -- they'll be fixed in place (audio re-encoded to PCM directly in the original file, video untouched) within a few seconds, no action needed.\n\nCheck status any time from a terminal with:\n$(self_status_hint)"
+        gui_log_ok "Installed. Import AAC-audio clips into Resolve normally from here on -- they'll be fixed in place within a few seconds, no action needed. Run davinci-aac-support-monitor any time to watch it work."
         return
     fi
     step "Done"
@@ -404,7 +441,19 @@ EOF
 
 do_install() {
     if [[ $GUI -eq 1 ]]; then
-        gui_progress_start "Starting installer..."
+        start_ui_server
+        if [[ ! -f "$PORT_FILE" ]]; then
+            # No dashboard to report through and no terminal attached either
+            # -- notify-send is the one thing left that has a real chance
+            # of the user actually seeing this.
+            command -v notify-send >/dev/null 2>&1 && \
+                notify-send -a "DaVinci AAC Support" "Install failed" "The installer dashboard didn't start. Try running install.sh from a terminal instead to see what went wrong."
+            exit 1
+        fi
+        # The dashboard server stays running after this script exits (its
+        # own 30-minute idle timeout cleans it up) so the page -- status,
+        # restart/uninstall buttons -- keeps working without a terminal
+        # attached to anything.
     else
         step "DaVinci AAC Support -- install"
     fi
@@ -414,7 +463,6 @@ do_install() {
     check_deps
     write_files
     start_service
-    gui_progress_stop
     confirm_connection
     print_summary
 }
@@ -470,7 +518,7 @@ do_uninstall() {
         exit 0
     fi
     systemctl --user disable --now "$SERVICE_NAME" 2>/dev/null || true
-    rm -f "$SERVICE_PATH" "$DAEMON_PATH"
+    rm -f "$SERVICE_PATH" "$DAEMON_PATH" "$UI_PATH" "$MONITOR_PATH"
     rm -rf "$STATE_DIR"
     systemctl --user daemon-reload
     ok "Service removed."

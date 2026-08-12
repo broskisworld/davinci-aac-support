@@ -74,8 +74,10 @@ back them up first.
 
    ![Right-click "Allow Launching" on the downloaded file](docs/images/desktop-file-trust.png)
 
-3. A short setup wizard walks you through the rest, including the one manual
-   step below.
+3. A dashboard opens in your browser and walks you through the rest,
+   including the one manual step below — no terminal involved:
+
+   ![The dashboard, showing an already-installed watcher's live status](docs/images/dashboard.png)
 
 The launcher just runs `install.sh` from the same folder — open it in a text
 editor first if you want to see exactly what it does before running it.
@@ -114,12 +116,15 @@ Free too.
 ## Usage
 
 Nothing, day to day — import AAC clips normally and they're fixed within a
-few seconds. A couple of commands if you want to check on it:
+few seconds. A couple of ways to check on it:
 
 ```bash
-./install.sh --status       # is it connected, what's it fixed so far
-./install.sh --uninstall    # removes the service and installed files
-journalctl --user -u davinci-aac-support.service -f   # live logs
+davinci-aac-support-monitor   # opens the same dashboard, live: connection
+                               # status, and a real-time feed as clips get
+                               # detected / converted / fixed
+./install.sh --status         # same info, plain text, for scripting
+./install.sh --uninstall      # removes the service and installed files
+journalctl --user -u davinci-aac-support.service -f   # raw logs
 ```
 
 ## How it works
@@ -140,32 +145,47 @@ journalctl --user -u davinci-aac-support.service -f   # live logs
   the path didn't change (`Audio Codec` flips from `AAC` to `Linear PCM` in
   Resolve's own clip properties), which is what actually clears the stale
   blank-audio state.
-- Runs as a `systemd --user` service (`install.sh` also supports a
-  zenity-driven GUI install flow with no terminal, auto-selected when
-  launched with no controlling terminal — e.g. via the `.desktop` file).
+- Runs as a `systemd --user` service. `install.sh` auto-selects a GUI flow
+  when launched with no controlling terminal (e.g. via the `.desktop` file):
+  it starts `davinci_aac_support_ui.py`, a small local web server (Python
+  stdlib only, no GUI-toolkit dependency), and opens it in the default
+  browser. The daemon separately emits structured events (clip detected /
+  converting / fixed) to a small JSONL file that both the install dashboard
+  and the standalone `davinci-aac-support-monitor` command tail live via
+  Server-Sent Events.
 
 There's no event hook for "clip imported" in Resolve's scripting API on
 Linux (checked) — polling is the only mechanism available, hence the small
 delay after import rather than instant.
 
-**Why a zip instead of one embedded file:** an earlier version packed
+**Why a local web page instead of a native GUI toolkit:** the installer used
+to drive `zenity` dialogs. Those look generic, and — more importantly —
+`zenity` isn't installed everywhere; KDE/Plasma ships `kdialog` instead, so a
+`zenity`-only GUI silently fails to nothing on non-GNOME desktops (no
+terminal attached to show the fallback text either). A browser doesn't care
+which desktop environment or toolkit is installed, so this sidesteps that
+entirely while also allowing an actual designed interface instead of stock
+dialog boxes.
+
+**Why a zip instead of one embedded file:** an even earlier version packed
 everything into a single `.desktop` file with the installer base64-encoded
 into its `Exec=` line, so it'd be one downloadable file. That's unreadable at
 a glance, which matters for something that runs on your machine — so
-`install.sh` now ships as a plain, readable script, with the daemon as an
-ordinary sibling file next to it (not embedded). The `.desktop` launcher just
-calls `install.sh`, in the clear.
+`install.sh` ships as a plain, readable script, with the daemon and dashboard
+as ordinary sibling files next to it (not embedded). The `.desktop` launcher
+just calls `install.sh`, in the clear.
 </details>
 
 ## Development
 
 ```bash
-python3 -m pytest tests/          # daemon logic + zip contents check
+python3 -m pytest tests/          # daemon + dashboard logic, zip contents check
 ./tests/test_install_cli.sh       # install.sh argument parsing etc.
 ```
 
-`davinci_aac_support_watch.py` and `install.sh` are both plain source files —
-nothing is generated or embedded between them. `davinci-aac-support.zip` is
+`davinci_aac_support_watch.py`, `davinci_aac_support_ui.py`, and `install.sh`
+are all plain source files — nothing is generated or embedded between them.
+`davinci-aac-support.zip` is
 the one generated artifact (see `build-release-zip.sh`); rebuild it after
 changing any packaged file:
 

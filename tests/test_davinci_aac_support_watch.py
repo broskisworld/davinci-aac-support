@@ -23,6 +23,7 @@ def reset_module_state(tmp_path, monkeypatch):
     watch._status_cache = {}
     watch._fixed_count = 0
     monkeypatch.setattr(watch, "STATUS_FILE", str(tmp_path / "status.json"))
+    monkeypatch.setattr(watch, "EVENTS_FILE", str(tmp_path / "events.jsonl"))
     monkeypatch.setattr(watch, "NOTIFY", None)  # don't shell out to notify-send in tests
     yield
 
