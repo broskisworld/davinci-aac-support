@@ -1,0 +1,15 @@
+# Captures dashboard screenshots for docs/images/ (see capture-screenshots.sh
+# for what's real vs. faked, and why). Debian is the canonical source for
+# what actually gets committed to docs/ -- see docker/capture-all-screenshots.sh.
+FROM debian:bookworm-slim
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+        bash curl ca-certificates python3 chromium ffmpeg && \
+    rm -rf /var/lib/apt/lists/*
+
+WORKDIR /work
+COPY . /work
+RUN chmod +x /work/install.sh /work/docker/capture-screenshots.sh
+
+ENTRYPOINT ["/work/docker/capture-screenshots.sh", "/out"]

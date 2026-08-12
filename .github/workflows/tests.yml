@@ -34,3 +34,55 @@ jobs:
 
       - name: Verify check_deps() on ${{ matrix.distro }} (real container, real package manager)
         run: ./docker/run-distro-tests.sh ${{ matrix.distro }}
+
+  screenshots:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        distro: [debian, fedora, arch]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build screenshot container (${{ matrix.distro }})
+        run: docker build -f docker/Dockerfile.screenshot-${{ matrix.distro }} -t shot:${{ matrix.distro }} .
+
+      - name: Capture dashboard screenshots (${{ matrix.distro }})
+        run: |
+          mkdir -p out
+          docker run --rm -v "$PWD/out:/out" shot:${{ matrix.distro }}
+
+      # All three distros are captured (visual-consistency check -- the
+      # dashboard is the same Python server + HTML/CSS regardless of
+      # distro, so these should render identically). Only Debian's is
+      # committed to docs/, in update-docs-screenshots below.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: installer-screenshots-${{ matrix.distro }}
+          path: out/*.png
+
+  update-docs-screenshots:
+    needs: screenshots
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: installer-screenshots-debian
+          path: docs/images/
+
+      - name: Commit updated screenshots, if they changed
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if git diff --quiet -- docs/images/installer-installing.png docs/images/installer-connected.png; then
+            echo "no change"
+          else
+            git add docs/images/installer-installing.png docs/images/installer-connected.png
+            git commit -m "Auto-update installer dashboard screenshots [skip ci]"
+            git push
+          fi

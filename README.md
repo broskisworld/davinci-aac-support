@@ -77,10 +77,15 @@ back them up first.
 3. A dashboard opens in your browser and walks you through the rest,
    including the one manual step below — no terminal involved:
 
-   ![The dashboard, showing an already-installed watcher's live status](docs/images/dashboard.png)
+   ![The dashboard mid-install, showing live progress](docs/images/installer-installing.png)
+   ![The dashboard once connected, showing live status and manage buttons](docs/images/installer-connected.png)
 
 The launcher just runs `install.sh` from the same folder — open it in a text
 editor first if you want to see exactly what it does before running it.
+
+<sup>Both screenshots above are generated automatically, not hand-captured —
+see [`docker/capture-all-screenshots.sh`](docker/capture-all-screenshots.sh)
+in Development below.</sup>
 
 ### Option B — terminal
 
@@ -200,6 +205,17 @@ real package manager in a container (`docker/run-distro-tests.sh` — also
 runnable locally, `./docker/run-distro-tests.sh` or with specific distros
 as args). Not just read-and-assume: this caught a real bug where the pacman
 branch needed a sync step it wasn't doing.
+
+The two dashboard screenshots above are also regenerated in CI on every push
+to `main` (`docker/capture-all-screenshots.sh` drives the real, unmodified
+`install.sh` through a faked-but-representative install in a container and
+screenshots it — see the script for exactly what's faked and why). It builds
+and captures from all three distros as a visual-consistency check, uploads
+all three as workflow artifacts, but only Debian's output is what's actually
+committed to `docs/images/` — CI auto-commits that pair of files back to
+`main` when they change, so the README can't drift out of sync with what the
+dashboard actually looks like. Run it locally the same way:
+`./docker/capture-all-screenshots.sh`.
 
 ## License
 

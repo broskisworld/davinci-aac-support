@@ -1,7 +1,16 @@
 # Screenshots needed
 
-Two images, referenced from the main README. Once captured, drop them in
-this folder with these exact filenames and delete this checklist file.
+Two images, referenced from the main README, that need a real desktop and
+a real DaVinci Resolve install to capture — no way to fake either
+convincingly in a container. Once captured, drop them in this folder with
+these exact filenames and delete this checklist file.
+
+(The other two screenshots the README uses, `installer-installing.png` and
+`installer-connected.png`, don't belong here — they're of the dashboard
+itself, which *can* be faked convincingly in a container, so those are
+generated automatically by CI. See `docker/capture-all-screenshots.sh` if
+you want to regenerate them locally; don't hand-capture or hand-edit them,
+CI will just overwrite whatever's there on the next push.)
 
 ## `desktop-file-trust.png`
 

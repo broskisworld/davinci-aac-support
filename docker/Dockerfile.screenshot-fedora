@@ -1,0 +1,14 @@
+# Captures dashboard screenshots for docs/images/ (see capture-screenshots.sh
+# for what's real vs. faked, and why). Runs alongside the Debian variant as
+# a visual-consistency check -- Debian is the canonical source actually
+# committed to docs/, see docker/capture-all-screenshots.sh.
+FROM fedora:latest
+
+RUN dnf install -y bash curl python3 chromium ffmpeg-free && \
+    dnf clean all
+
+WORKDIR /work
+COPY . /work
+RUN chmod +x /work/install.sh /work/docker/capture-screenshots.sh
+
+ENTRYPOINT ["/work/docker/capture-screenshots.sh", "/out"]
