@@ -33,10 +33,54 @@ STATUS_FILE = os.path.join(STATE_DIR, "status.json")
 INSTALL_LOG = os.path.join(STATE_DIR, "install-log.jsonl")
 EVENTS_FILE = os.path.join(STATE_DIR, "events.jsonl")
 PORT_FILE = os.path.join(STATE_DIR, "ui-port.txt")
+PID_FILE = os.path.join(STATE_DIR, "ui-pid.txt")
+
+# Idle timeout: self-destruct after this long with zero HTTP requests.
+# Not wall-clock-since-start -- a real open tab (install or monitor mode
+# both poll /api/status every 4s from the page's own JS) keeps this reset
+# indefinitely, so a legitimate long session is never killed. This exists
+# because a previous wall-clock-only version left monitor-mode servers
+# (no timeout at all) running for two weeks after their tab was closed,
+# found via `ps` during a manual install test.
+IDLE_TIMEOUT_SECONDS = 2 * 60 * 60
+_last_activity = time.time()
+
+# How long the uninstall action waits before exiting, so the HTTP response
+# confirming success has time to actually reach the browser first. A named
+# constant (not an inline literal) so tests can shrink it instead of
+# either sleeping for real or patching the global time.sleep.
+UNINSTALL_EXIT_DELAY_SECONDS = 3
 
 
 def is_installed():
     return os.path.isfile(SERVICE_PATH)
+
+
+def is_process_alive(pid):
+    try:
+        os.kill(pid, 0)
+        return True
+    except (OSError, ProcessLookupError):
+        return False
+
+
+def kill_existing_server():
+    """Kills a previous instance of this server if one is still running
+    (stale PID file from an install that was never cleanly stopped) --
+    otherwise repeated installs/uninstalls just pile up orphaned
+    processes, one per run, forever."""
+    if not os.path.isfile(PID_FILE):
+        return
+    try:
+        with open(PID_FILE) as f:
+            old_pid = int(f.read().strip())
+    except (OSError, ValueError):
+        return
+    if old_pid != os.getpid() and is_process_alive(old_pid):
+        try:
+            os.kill(old_pid, 15)
+        except OSError:
+            pass
 
 
 def is_active():
@@ -314,6 +358,8 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_GET(self):
+        global _last_activity
+        _last_activity = time.time()
         path = self.path.split("?")[0]
         if path == "/":
             body = PAGE.replace("%%MODE%%", json.dumps(self.server.mode)).encode()
@@ -336,6 +382,8 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
 
     def do_POST(self):
+        global _last_activity
+        _last_activity = time.time()
         length = int(self.headers.get("Content-Length", 0))
         try:
             body = json.loads(self.rfile.read(length) or b"{}")
@@ -369,12 +417,24 @@ class Handler(BaseHTTPRequestHandler):
                 except FileNotFoundError:
                     pass
             subprocess.run(["systemctl", "--user", "daemon-reload"], timeout=15)
-            # Deliberately not removing STATE_DIR here, unlike install.sh's
-            # CLI uninstall -- this server process (and the page's own
-            # ongoing status polling) lives under STATE_DIR/ui-port.txt, so
+            # Not removing STATE_DIR outright -- this server process (and
+            # the page's own ongoing status polling) lives under it, so
             # pulling the directory out from under itself while still
-            # serving the confirmation is asking for trouble. Nothing left
-            # behind is sensitive (status.json becomes correctly stale).
+            # serving the confirmation is asking for trouble. Instead,
+            # exit shortly after this response is sent: this is the one
+            # server lifecycle event that can't rely on the idle-timeout
+            # thread (uninstall clearly means "done", not "idle"), and
+            # unlike install.sh's own --uninstall path, nothing external
+            # is watching this process's PID to kill it for us.
+            def delayed_exit():
+                time.sleep(UNINSTALL_EXIT_DELAY_SECONDS)
+                for p in (PID_FILE, PORT_FILE):
+                    try:
+                        os.remove(p)
+                    except FileNotFoundError:
+                        pass
+                os._exit(0)
+            threading.Thread(target=delayed_exit, daemon=True).start()
             return {"ok": True}
         return {"ok": False, "error": "unknown action"}
 
@@ -406,11 +466,15 @@ def main():
     args = parser.parse_args()
 
     os.makedirs(STATE_DIR, exist_ok=True)
+    kill_existing_server()
+
     server = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
     server.mode = args.mode
     port = server.server_address[1]
     with open(PORT_FILE, "w") as f:
         f.write(str(port))
+    with open(PID_FILE, "w") as f:
+        f.write(str(os.getpid()))
 
     url = f"http://127.0.0.1:{port}/"
     print(f"SERVER_URL={url}", flush=True)
@@ -425,16 +489,17 @@ def main():
 
     threading.Thread(target=open_browser, daemon=True).start()
 
-    if args.mode == "install":
-        # This process outlives install.sh (started detached, so the page
-        # keeps working with no terminal attached) -- bound its lifetime so
-        # it doesn't linger forever once the user's done looking at it.
-        # Monitor mode has no timeout: that one's explicitly launched to
-        # watch something ongoing, for as long as that takes.
-        def self_destruct():
-            time.sleep(30 * 60)
-            os._exit(0)
-        threading.Thread(target=self_destruct, daemon=True).start()
+    # Idle-timeout self-destruct, same for both modes: a real open tab
+    # (either mode's page polls /api/status every 4s) keeps resetting
+    # this, so a legitimate session is never killed mid-use -- this only
+    # fires once nothing has looked at the page in IDLE_TIMEOUT_SECONDS,
+    # e.g. the tab was closed and the process just forgotten about.
+    def idle_watchdog():
+        while True:
+            time.sleep(60)
+            if time.time() - _last_activity > IDLE_TIMEOUT_SECONDS:
+                os._exit(0)
+    threading.Thread(target=idle_watchdog, daemon=True).start()
 
     server.serve_forever()
 

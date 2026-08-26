@@ -68,6 +68,7 @@ STATE_DIR="$HOME/.cache/davinci-aac-support"
 STATUS_FILE="$STATE_DIR/status.json"
 INSTALL_LOG="$STATE_DIR/install-log.jsonl"
 PORT_FILE="$STATE_DIR/ui-port.txt"
+UI_PID_FILE="$STATE_DIR/ui-pid.txt"
 
 # When run via "curl | bash", $0 is just the literal string "bash" -- not a
 # real, re-runnable path. Detect that and fall back to raw systemctl/
@@ -518,6 +519,13 @@ do_uninstall() {
         exit 0
     fi
     systemctl --user disable --now "$SERVICE_NAME" 2>/dev/null || true
+    # Any dashboard/monitor server started against this STATE_DIR (install
+    # mode or a standalone davinci-aac-support-monitor) would otherwise
+    # keep running as an orphaned process indefinitely -- confirmed via a
+    # real `ps` check during testing that this was actually happening.
+    if [[ -f "$UI_PID_FILE" ]]; then
+        kill "$(cat "$UI_PID_FILE")" 2>/dev/null || true
+    fi
     rm -f "$SERVICE_PATH" "$DAEMON_PATH" "$UI_PATH" "$MONITOR_PATH"
     rm -rf "$STATE_DIR"
     systemctl --user daemon-reload
