@@ -64,7 +64,30 @@ back them up first.
 
 ## Install
 
-### Option A — download, no terminal
+### Option A — `.deb` (Debian, Ubuntu, Mint, and other apt-based distros)
+
+1. Download **[`davinci-aac-support_1.0-1_all.deb`](davinci-aac-support_1.0-1_all.deb)**.
+2. Double-click it — it opens in your distro's normal package installer
+   (GNOME Software, KDE Discover, `gdebi`, etc.). Confirm the install, same
+   as any other `.deb`.
+3. The setup window opens on its own right after install finishes — no
+   separate step to remember:
+
+   ![The setup window that opens automatically after installing the .deb](docs/images/installer-installing.png)
+   ![The setup window once connected, showing live status and manage buttons](docs/images/installer-connected.png)
+
+   (If it doesn't appear — some desktop setups can't be auto-detected from a
+   package install — open **DaVinci AAC Support** from your applications
+   menu instead; it runs the exact same setup.)
+
+This is a real package: it shows up in your system's package manager and
+`apt remove davinci-aac-support` uninstalls it cleanly.
+
+<sup>Both screenshots above are generated automatically, not hand-captured —
+see [`docker/capture-all-screenshots.sh`](docker/capture-all-screenshots.sh)
+in Development below.</sup>
+
+### Option B — `.zip` (any other distro)
 
 1. Download **[`davinci-aac-support.zip`](davinci-aac-support.zip)** and extract it.
 2. Double-click **`davinci-aac-support.desktop`** inside the extracted folder.
@@ -74,20 +97,13 @@ back them up first.
 
    ![Right-click "Allow Launching" on the downloaded file](docs/images/desktop-file-trust.png)
 
-3. A dashboard opens in your browser and walks you through the rest,
-   including the one manual step below — no terminal involved:
-
-   ![The dashboard mid-install, showing live progress](docs/images/installer-installing.png)
-   ![The dashboard once connected, showing live status and manage buttons](docs/images/installer-connected.png)
+3. The same setup window opens and walks you through the rest, including the
+   one manual step below — no terminal involved.
 
 The launcher just runs `install.sh` from the same folder — open it in a text
 editor first if you want to see exactly what it does before running it.
 
-<sup>Both screenshots above are generated automatically, not hand-captured —
-see [`docker/capture-all-screenshots.sh`](docker/capture-all-screenshots.sh)
-in Development below.</sup>
-
-### Option B — terminal
+### Option C — terminal
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/broskisworld/davinci-aac-support/main/install.sh | bash
@@ -151,13 +167,16 @@ journalctl --user -u davinci-aac-support.service -f   # raw logs
   Resolve's own clip properties), which is what actually clears the stale
   blank-audio state.
 - Runs as a `systemd --user` service. `install.sh` auto-selects a GUI flow
-  when launched with no controlling terminal (e.g. via the `.desktop` file):
-  it starts `davinci_aac_support_ui.py`, a small local web server (Python
-  stdlib only, no GUI-toolkit dependency), and opens it in the default
-  browser. The daemon separately emits structured events (clip detected /
-  converting / fixed) to a small JSONL file that both the install dashboard
-  and the standalone `davinci-aac-support-monitor` command tail live via
-  Server-Sent Events.
+  when launched with no controlling terminal (e.g. via the `.desktop` file,
+  or the `.deb`'s postinst): it starts `davinci_aac_support_ui.py`, a small
+  local web server (Python stdlib only, no GUI-toolkit dependency), and
+  opens it as a standalone, chrome-less window via Chromium/Chrome's
+  `--app=` mode (no address bar or tabs — reads as a real installer window,
+  not a webpage; falls back to a plain browser tab via `xdg-open` if no
+  Chromium-based browser is installed). The daemon separately emits
+  structured events (clip detected / converting / fixed) to a small JSONL
+  file that both the install window and the standalone
+  `davinci-aac-support-monitor` command tail live via Server-Sent Events.
 
 There's no event hook for "clip imported" in Resolve's scripting API on
 Linux (checked) — polling is the only mechanism available, hence the small

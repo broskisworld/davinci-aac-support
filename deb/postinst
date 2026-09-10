@@ -1,0 +1,79 @@
+#!/bin/sh
+set -e
+
+# Refresh the desktop database so the new app-menu entry shows up
+# immediately, without needing a logout/login. update-desktop-database
+# isn't installed on every minimal system, so this is best-effort --
+# most desktop environments also pick up new .desktop files on their own
+# via inotify within a few seconds either way.
+if command -v update-desktop-database >/dev/null 2>&1; then
+    update-desktop-database -q /usr/share/applications || true
+fi
+
+# Everything below is a best-effort attempt to make this feel like "a
+# regular install" -- opening the setup window itself, right now,
+# instead of leaving the user staring at an apt/Software-Center progress
+# bar with no feedback. postinst runs as root, so reaching into the
+# real desktop user's session (to run a GUI program, or even just to
+# show a notification) always requires guessing which session is
+# "theirs" -- there's no fully reliable way to do this from here on
+# every possible setup (SSH-only installs, multiple concurrent logins,
+# non-systemd session managers all defeat it). So this must never be
+# allowed to fail or delay the package transaction: every step below is
+# wrapped so a detection miss just falls back to silence, and the
+# app-menu entry (installed above) remains the guaranteed way in.
+davinci_aac_support_notify_and_launch() {
+    session_id=""
+    for s in $(loginctl list-sessions --no-legend 2>/dev/null | awk '{print $1}'); do
+        state="$(loginctl show-session "$s" -p State --value 2>/dev/null || true)"
+        type="$(loginctl show-session "$s" -p Type --value 2>/dev/null || true)"
+        if [ "$state" = "active" ] && { [ "$type" = "x11" ] || [ "$type" = "wayland" ]; }; then
+            session_id="$s"
+            break
+        fi
+    done
+    [ -n "$session_id" ] || return 0
+
+    target_user="$(loginctl show-session "$session_id" -p Name --value 2>/dev/null || true)"
+    target_uid="$(loginctl show-session "$session_id" -p User --value 2>/dev/null || true)"
+    [ -n "$target_user" ] && [ -n "$target_uid" ] || return 0
+
+    # loginctl's own Display property is frequently blank (seen even on
+    # a plain single-user X11 desktop while building this) -- fall back
+    # to scanning for any process the target user owns that has a
+    # DISPLAY set in its environment, which is how tools like this
+    # normally recover it from outside the session.
+    display="$(loginctl show-session "$session_id" -p Display --value 2>/dev/null || true)"
+    if [ -z "$display" ]; then
+        for proc in /proc/[0-9]*; do
+            owner_uid="$(stat -c %u "$proc" 2>/dev/null || true)"
+            [ "$owner_uid" = "$target_uid" ] || continue
+            found="$(tr '\0' '\n' < "$proc/environ" 2>/dev/null | grep '^DISPLAY=' | head -n1 || true)"
+            if [ -n "$found" ]; then
+                display="${found#DISPLAY=}"
+                break
+            fi
+        done
+    fi
+    [ -n "$display" ] || display=":0"
+
+    runtime_dir="/run/user/$target_uid"
+    session_env="DISPLAY=$display DBUS_SESSION_BUS_ADDRESS=unix:path=$runtime_dir/bus XDG_RUNTIME_DIR=$runtime_dir"
+
+    # Fired unconditionally, whether or not the launch below actually
+    # ends up on screen -- the one guaranteed piece of "yes, something
+    # happened" feedback.
+    if command -v notify-send >/dev/null 2>&1; then
+        runuser -u "$target_user" -- env $session_env \
+            notify-send -a "DaVinci AAC Support" "DaVinci AAC Support installed" \
+            "Opening setup..." >/dev/null 2>&1 || true
+    fi
+
+    runuser -u "$target_user" -- env $session_env \
+        /usr/share/davinci-aac-support/install.sh >/dev/null 2>&1 &
+    return 0
+}
+
+davinci_aac_support_notify_and_launch || true
+
+exit 0

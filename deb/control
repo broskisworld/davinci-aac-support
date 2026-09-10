@@ -1,0 +1,17 @@
+Package: davinci-aac-support
+Version: __VERSION__
+Section: video
+Priority: optional
+Architecture: all
+Depends: python3, ffmpeg, systemd, curl
+Recommends: libnotify-bin
+Maintainer: Josh Bosley
+Homepage: https://github.com/broskisworld/davinci-aac-support
+Description: Fixes DaVinci Resolve's silent AAC audio import bug on Linux
+ Installs a background watcher that detects AAC audio DaVinci Resolve
+ can't decode on Linux and re-encodes it to PCM in place, so imported
+ clips just work. The setup window opens automatically right after
+ install to finish the one-time per-user step (the watcher itself runs
+ as your own systemd --user service, not a system daemon, so it can't
+ be started as part of the package install itself). If it doesn't
+ appear, open "DaVinci AAC Support" from your applications menu instead.

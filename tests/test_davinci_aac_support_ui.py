@@ -117,6 +117,64 @@ class TestKillExistingServer:
             mock_kill.assert_called_once_with(54321, 15)
 
 
+class TestOpenBrowser:
+    def test_prefers_first_available_chromium_candidate(self, monkeypatch):
+        # google-chrome-stable is present but google-chrome (first in the
+        # candidate list) should still win when both exist.
+        monkeypatch.setattr(
+            ui.shutil, "which",
+            lambda name: f"/usr/bin/{name}" if name in ("google-chrome", "google-chrome-stable") else None,
+        )
+        monkeypatch.setattr(ui.time, "sleep", lambda *_: None)
+        with patch.object(ui.subprocess, "Popen") as mock_popen:
+            ui.open_browser("http://127.0.0.1:9999/")
+            mock_popen.assert_called_once()
+            args = mock_popen.call_args[0][0]
+            assert args[0] == "/usr/bin/google-chrome"
+            assert "--app=http://127.0.0.1:9999/" in args
+            assert "--window-size=560,760" in args
+
+    def test_falls_back_to_next_candidate_when_earlier_ones_are_missing(self, monkeypatch):
+        monkeypatch.setattr(
+            ui.shutil, "which",
+            lambda name: "/usr/bin/chromium" if name == "chromium" else None,
+        )
+        monkeypatch.setattr(ui.time, "sleep", lambda *_: None)
+        with patch.object(ui.subprocess, "Popen") as mock_popen:
+            ui.open_browser("http://127.0.0.1:9999/")
+            args = mock_popen.call_args[0][0]
+            assert args[0] == "/usr/bin/chromium"
+
+    def test_falls_back_to_xdg_open_when_no_chromium_browser_found(self, monkeypatch):
+        monkeypatch.setattr(ui.shutil, "which", lambda name: None)
+        monkeypatch.setattr(ui.time, "sleep", lambda *_: None)
+        with patch.object(ui.subprocess, "Popen") as mock_popen:
+            ui.open_browser("http://127.0.0.1:9999/")
+            mock_popen.assert_called_once_with(
+                ["xdg-open", "http://127.0.0.1:9999/"],
+                stdout=ui.subprocess.DEVNULL, stderr=ui.subprocess.DEVNULL,
+            )
+
+    def test_does_not_raise_when_nothing_launchable_exists(self, monkeypatch):
+        monkeypatch.setattr(ui.shutil, "which", lambda name: None)
+        monkeypatch.setattr(ui.time, "sleep", lambda *_: None)
+        with patch.object(ui.subprocess, "Popen", side_effect=FileNotFoundError):
+            ui.open_browser("http://127.0.0.1:9999/")  # must not raise
+
+    def test_tries_next_candidate_if_launching_one_found_browser_fails(self, monkeypatch):
+        # shutil.which found it, but Popen still fails to exec (e.g. a
+        # broken symlink) -- must not give up, should try the rest.
+        monkeypatch.setattr(
+            ui.shutil, "which",
+            lambda name: f"/usr/bin/{name}" if name in ("google-chrome", "chromium") else None,
+        )
+        monkeypatch.setattr(ui.time, "sleep", lambda *_: None)
+        with patch.object(ui.subprocess, "Popen", side_effect=[OSError(), MagicMock()]) as mock_popen:
+            ui.open_browser("http://127.0.0.1:9999/")
+            assert mock_popen.call_count == 2
+            assert mock_popen.call_args[0][0][0] == "/usr/bin/chromium"
+
+
 class TestPageTemplate:
     def test_mode_placeholder_present_and_no_leftovers_after_substitution(self):
         assert "%%MODE%%" in ui.PAGE

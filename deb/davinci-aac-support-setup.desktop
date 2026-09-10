@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=DaVinci AAC Support
+Comment=Install or manage the AAC audio fix for DaVinci Resolve
+Icon=multimedia-volume-control
+Exec=/usr/share/davinci-aac-support/install.sh
+Terminal=false
+Categories=AudioVideo;
+NoDisplay=false

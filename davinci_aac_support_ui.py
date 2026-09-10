@@ -15,6 +15,7 @@ Two entry points, both backed by this same server:
 import argparse
 import json
 import os
+import shutil
 import subprocess
 import sys
 import threading
@@ -459,6 +460,42 @@ class Handler(BaseHTTPRequestHandler):
             return
 
 
+CHROMIUM_BROWSER_CANDIDATES = ("google-chrome", "google-chrome-stable", "chromium", "chromium-browser")
+
+
+def open_browser(url):
+    time.sleep(0.3)
+    # A plain browser tab -- address bar, other tabs, "you're looking
+    # at a website" framing -- doesn't read as "installing an app".
+    # Chromium's --app= mode opens a standalone, chrome-less window
+    # instead (no address bar, no tabs, just the page with its own
+    # window/taskbar entry) -- a real installer window, not a webpage.
+    # subprocess.Popen (not .run): launching a browser that isn't
+    # already running blocks until that window is closed, and this
+    # runs on a daemon thread, so .run() would just sit there
+    # harmlessly -- but Popen is the correct fire-and-forget tool for
+    # the job regardless, not "harmless to block on" by accident.
+    for browser in CHROMIUM_BROWSER_CANDIDATES:
+        path = shutil.which(browser)
+        if not path:
+            continue
+        try:
+            subprocess.Popen(
+                [path, f"--app={url}", "--window-size=560,760"],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, stdin=subprocess.DEVNULL,
+            )
+            return
+        except OSError:
+            continue
+    # No Chromium-based browser found at all -- fall back to whatever
+    # the default browser is, as a plain tab. Still functional, just
+    # not as polished.
+    try:
+        subprocess.Popen(["xdg-open", url], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except FileNotFoundError:
+        pass
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--mode", choices=["install", "monitor"], required=True)
@@ -479,15 +516,7 @@ def main():
     url = f"http://127.0.0.1:{port}/"
     print(f"SERVER_URL={url}", flush=True)
 
-    def open_browser():
-        time.sleep(0.3)
-        try:
-            subprocess.run(["xdg-open", url], check=False,
-                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        except FileNotFoundError:
-            pass
-
-    threading.Thread(target=open_browser, daemon=True).start()
+    threading.Thread(target=open_browser, args=(url,), daemon=True).start()
 
     # Idle-timeout self-destruct, same for both modes: a real open tab
     # (either mode's page polls /api/status every 4s) keeps resetting
