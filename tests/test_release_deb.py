@@ -22,6 +22,7 @@ PACKAGED_FILES = {
     "./usr/share/davinci-aac-support/install.sh": "install.sh",
     "./usr/share/davinci-aac-support/davinci_aac_support_watch.py": "davinci_aac_support_watch.py",
     "./usr/share/davinci-aac-support/davinci_aac_support_ui.py": "davinci_aac_support_ui.py",
+    "./usr/share/davinci-aac-support/davinci_aac_support_config.py": "davinci_aac_support_config.py",
     "./usr/share/applications/davinci-aac-support-setup.desktop": "deb/davinci-aac-support-setup.desktop",
     "./usr/share/doc/davinci-aac-support/README.md": "README.md",
     "./usr/share/doc/davinci-aac-support/copyright": "LICENSE",

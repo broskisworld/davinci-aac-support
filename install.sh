@@ -61,10 +61,12 @@ BIN_DIR="$HOME/.local/bin"
 SERVICE_DIR="$HOME/.config/systemd/user"
 DAEMON_PATH="$BIN_DIR/davinci_aac_support_watch.py"
 UI_PATH="$BIN_DIR/davinci_aac_support_ui.py"
+CONFIG_MODULE_PATH="$BIN_DIR/davinci_aac_support_config.py"
 MONITOR_PATH="$BIN_DIR/davinci-aac-support-monitor"
 SERVICE_NAME="davinci-aac-support.service"
 SERVICE_PATH="$SERVICE_DIR/$SERVICE_NAME"
 STATE_DIR="$HOME/.cache/davinci-aac-support"
+CONFIG_DIR="$HOME/.config/davinci-aac-support"
 STATUS_FILE="$STATE_DIR/status.json"
 INSTALL_LOG="$STATE_DIR/install-log.jsonl"
 PORT_FILE="$STATE_DIR/ui-port.txt"
@@ -127,6 +129,11 @@ start_ui_server() {
     if [[ ! -f "$ui_source" ]]; then
         ui_script="$STATE_DIR/davinci_aac_support_ui.py"
         curl -fsSL "$GITHUB_RAW_BASE/davinci_aac_support_ui.py" -o "$ui_script" || return 1
+        # ui.py imports its sibling config module -- Python resolves that
+        # import relative to ui_script's own directory, so it needs to land
+        # right next to it here too, not just in $BIN_DIR (that copy
+        # happens later, in write_files, which hasn't run yet at this point).
+        curl -fsSL "$GITHUB_RAW_BASE/davinci_aac_support_config.py" -o "$STATE_DIR/davinci_aac_support_config.py" || return 1
     fi
 
     python3 "$ui_script" --mode install >/dev/null 2>&1 &
@@ -288,6 +295,15 @@ write_files() {
     fi
     chmod +x "$UI_PATH"
     ui_ok "Dashboard installed"
+
+    local config_source="$SCRIPT_DIR/davinci_aac_support_config.py"
+    if [[ -f "$config_source" ]]; then
+        cp "$config_source" "$CONFIG_MODULE_PATH"
+    else
+        if ! curl -fsSL "$GITHUB_RAW_BASE/davinci_aac_support_config.py" -o "$CONFIG_MODULE_PATH"; then
+            ui_fail "Couldn't fetch davinci_aac_support_config.py from GitHub and no local copy was found next to install.sh."
+        fi
+    fi
 
     cat > "$MONITOR_PATH" <<MONEOF
 #!/usr/bin/env bash
@@ -518,6 +534,23 @@ do_uninstall() {
         echo "  Cancelled."
         exit 0
     fi
+
+    # Read settings before CONFIG_DIR is deleted below -- needed for the
+    # accurate closing message (conversion_mode affects whether there's a
+    # separate output folder the user should know about).
+    local conversion_mode="in_place" output_directory=""
+    if [[ -f "$CONFIG_MODULE_PATH" ]]; then
+        read -r conversion_mode output_directory < <(
+            python3 -c "
+import sys
+sys.path.insert(0, '$BIN_DIR')
+import davinci_aac_support_config as c
+cfg = c.load_config()
+print(cfg['conversion_mode'], cfg['output_directory'])
+" 2>/dev/null
+        ) || true
+    fi
+
     systemctl --user disable --now "$SERVICE_NAME" 2>/dev/null || true
     # Any dashboard/monitor server started against this STATE_DIR (install
     # mode or a standalone davinci-aac-support-monitor) would otherwise
@@ -526,13 +559,18 @@ do_uninstall() {
     if [[ -f "$UI_PID_FILE" ]]; then
         kill "$(cat "$UI_PID_FILE")" 2>/dev/null || true
     fi
-    rm -f "$SERVICE_PATH" "$DAEMON_PATH" "$UI_PATH" "$MONITOR_PATH"
-    rm -rf "$STATE_DIR"
+    rm -f "$SERVICE_PATH" "$DAEMON_PATH" "$UI_PATH" "$CONFIG_MODULE_PATH" "$MONITOR_PATH"
+    rm -rf "$STATE_DIR" "$CONFIG_DIR"
     systemctl --user daemon-reload
     ok "Service removed."
     echo
-    echo "  Note: any clips it already fixed keep their PCM audio -- fixing is"
-    echo "  in-place, so there's no separate cache to clean up and nothing to undo."
+    if [[ "$conversion_mode" == "separate_directory" ]]; then
+        echo "  Note: fixed copies were saved to $output_directory -- those are"
+        echo "  your files now, left in place. Delete them yourself if you don't want them."
+    else
+        echo "  Note: fixing was in place, so there's no separate cache of converted"
+        echo "  files to clean up."
+    fi
 }
 
 case "$ACTION" in

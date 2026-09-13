@@ -43,6 +43,7 @@ mkdir -p \
 install -m 0755 install.sh "$PKG/usr/share/davinci-aac-support/install.sh"
 install -m 0644 davinci_aac_support_watch.py "$PKG/usr/share/davinci-aac-support/davinci_aac_support_watch.py"
 install -m 0644 davinci_aac_support_ui.py "$PKG/usr/share/davinci-aac-support/davinci_aac_support_ui.py"
+install -m 0644 davinci_aac_support_config.py "$PKG/usr/share/davinci-aac-support/davinci_aac_support_config.py"
 install -m 0644 deb/davinci-aac-support-setup.desktop "$PKG/usr/share/applications/davinci-aac-support-setup.desktop"
 install -m 0644 README.md "$PKG/usr/share/doc/davinci-aac-support/README.md"
 install -m 0644 LICENSE "$PKG/usr/share/doc/davinci-aac-support/copyright"

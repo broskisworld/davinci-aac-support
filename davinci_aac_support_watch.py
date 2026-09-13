@@ -2,10 +2,12 @@
 """Background watcher: auto-fixes AAC audio in DaVinci Resolve's open project.
 
 Polls the current project's Media Pool. Any clip whose audio stream(s) are
-AAC gets remuxed to PCM in place (video stream-copied, untouched) and the
-same Media Pool item is refreshed via MediaPoolItem.ReplaceClip(), which
-preserves its bin location and any timeline placements.
+AAC gets remuxed to PCM (video stream-copied, untouched) and the same Media
+Pool item is refreshed via MediaPoolItem.ReplaceClip(), which preserves its
+bin location and any timeline placements -- even when the file's path
+changes (see conversion_mode in davinci_aac_support_config.py).
 """
+import hashlib
 import json
 import os
 import shutil
@@ -13,6 +15,8 @@ import subprocess
 import sys
 import tempfile
 import time
+
+import davinci_aac_support_config as settings
 
 RESOLVE_SCRIPT_API = "/opt/resolve/Developer/Scripting"
 RESOLVE_SCRIPT_LIB = "/opt/resolve/libs/Fusion/fusionscript.so"
@@ -116,42 +120,95 @@ def has_aac_audio(path):
     return "aac" in codecs
 
 
-def convert_in_place(path):
-    # ffmpeg can't read and write the same path at once, so this converts to
-    # a temp file in the SAME directory as the source (same filesystem, so
-    # the final swap is an atomic rename, not a copy) and replaces the
-    # original on success. No separate copy is left behind either way.
-    directory = os.path.dirname(path) or "."
+SAFE_MAP_ARGS = ["-map", "0:v?", "-map", "0:a?", "-c:v", "copy", "-c:a", "pcm_s16le"]
+
+# "-map 0" (every stream) plus "-f mov": embeds anything else in the file
+# (timecode, GPS/telemetry) too, but requires the QuickTime muxer -- some
+# camera timecode tracks report no usable codec ID to ffmpeg's demuxer, and
+# the standard MP4 muxer flatly refuses to write those at all, even with
+# nothing else being re-encoded (confirmed live: same failure on a pure
+# stream copy). QuickTime's own muxer will write them; the cost is the
+# output file's container brand changes from mp4/isom to qt, even though
+# the extension doesn't.
+FULL_PRESERVE_ARGS = ["-map", "0", "-c", "copy", "-c:a", "pcm_s16le", "-f", "mov"]
+
+
+def get_non_av_stream_types(path):
+    try:
+        out = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries", "stream=codec_type", "-of", "csv=p=0", path],
+            capture_output=True, text=True, timeout=30,
+        )
+    except Exception:
+        return []
+    types = [t.strip() for t in out.stdout.splitlines() if t.strip()]
+    return [t for t in types if t not in ("video", "audio")]
+
+
+def _hashed_output_path(path, output_directory):
+    # Deterministic from the source's absolute path: reprocessing the same
+    # clip converges on the same output file (no pile-up across restarts),
+    # while two different source files that happen to share a basename
+    # never collide.
+    stem, ext = os.path.splitext(os.path.basename(path))
+    digest = hashlib.sha1(os.path.abspath(path).encode()).hexdigest()[:8]
+    return os.path.join(output_directory, f"{stem}-{digest}{ext}")
+
+
+def convert_clip(path):
+    cfg = settings.load_config()
+    separate_dir = cfg["conversion_mode"] == settings.MODE_SEPARATE_DIRECTORY
+
+    if separate_dir:
+        output_directory = cfg["output_directory"]
+        try:
+            os.makedirs(output_directory, exist_ok=True)
+        except OSError as e:
+            log(f"  can't create output directory {output_directory}: {e}")
+            return None
+        directory = output_directory
+        final_path = _hashed_output_path(path, output_directory)
+    else:
+        # ffmpeg can't read and write the same path at once, so this
+        # converts to a temp file in the SAME directory as the source (same
+        # filesystem, so the final swap is an atomic rename, not a copy)
+        # and replaces the original on success. No separate copy is left
+        # behind -- the original file stops existing once this succeeds.
+        directory = os.path.dirname(path) or "."
+        final_path = path
+
     ext = os.path.splitext(path)[1]
     try:
         fd, tmp_path = tempfile.mkstemp(dir=directory, suffix=ext)
         os.close(fd)
     except OSError as e:
-        log(f"  can't write alongside source, skipping (read-only mount?): {e}")
-        return False
+        log(f"  can't write to {directory}, skipping (read-only mount?): {e}")
+        return None
 
-    log(f"  converting in place: {path}")
+    non_av_streams = get_non_av_stream_types(path) if cfg["allow_container_change"] else []
+
+    log(f"  converting: {path}" + ("" if final_path == path else f" -> {final_path}"))
     t0 = time.time()
-    result = subprocess.run(
-        # Only video/audio streams are mapped (not "-map 0", every stream):
-        # some cameras embed a data-only "tmcd" timecode track that ffmpeg
-        # can't remux into mp4 via stream copy once another stream in the
-        # file is being re-encoded ("Could not find tag for codec none in
-        # stream #2" -- confirmed live against a real failing file). Video
-        # and audio are all DaVinci Resolve needs here; the "?" suffix
-        # keeps this from erroring on files missing one or the other.
-        ["ffmpeg", "-y", "-i", path, "-map", "0:v?", "-map", "0:a?",
-         "-c:v", "copy", "-c:a", "pcm_s16le", tmp_path],
-        capture_output=True, text=True,
-    )
+
+    if non_av_streams:
+        result = subprocess.run(["ffmpeg", "-y", "-i", path, *FULL_PRESERVE_ARGS, tmp_path],
+                                 capture_output=True, text=True)
+        if result.returncode != 0:
+            log("  container-preserving conversion failed, falling back to video+audio only")
+            result = subprocess.run(["ffmpeg", "-y", "-i", path, *SAFE_MAP_ARGS, tmp_path],
+                                     capture_output=True, text=True)
+    else:
+        result = subprocess.run(["ffmpeg", "-y", "-i", path, *SAFE_MAP_ARGS, tmp_path],
+                                 capture_output=True, text=True)
+
     if result.returncode != 0:
         log(f"  ffmpeg FAILED ({time.time()-t0:.0f}s): {result.stderr[-800:]}")
         os.remove(tmp_path)
-        return False
+        return None
 
-    os.replace(tmp_path, path)
-    log(f"  converted in place in {time.time()-t0:.0f}s")
-    return True
+    os.replace(tmp_path, final_path)
+    log(f"  converted in {time.time()-t0:.0f}s")
+    return final_path
 
 
 def process_clip(clip):
@@ -173,8 +230,9 @@ def process_clip(clip):
     log(f"AAC audio detected: {name}")
     emit_event("detected", f"AAC audio detected: {name}")
 
-    emit_event("converting", f"Converting in place: {name}")
-    if not convert_in_place(path):
+    emit_event("converting", f"Converting: {name}")
+    new_path = convert_clip(path)
+    if not new_path:
         notify("AAC Support failed", name)
         emit_event("failed", f"Conversion failed: {name}")
         # Without this, a clip that fails once gets retried (and re-fires
@@ -184,11 +242,11 @@ def process_clip(clip):
         _status_cache[uid] = "failed"
         return
 
-    # Same path in and out -- ReplaceClip still forces Resolve to re-read
-    # the file's metadata (confirmed live: Audio Codec property flips from
-    # "AAC" to "Linear PCM" after this call), which is what actually clears
-    # the stale blank-audio state in the Media Pool.
-    if clip.ReplaceClip(path):
+    # In "in place" mode new_path == path, but ReplaceClip still forces
+    # Resolve to re-read the file's metadata even then (confirmed live:
+    # Audio Codec property flips from "AAC" to "Linear PCM" after this
+    # call) -- that's what actually clears the stale blank-audio state.
+    if clip.ReplaceClip(new_path):
         log(f"  refreshed in Media Pool: {name}")
         notify("AAC audio fixed", name)
         emit_event("fixed", f"Fixed: {name}")

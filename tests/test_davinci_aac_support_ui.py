@@ -10,6 +10,7 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.error
 import urllib.request
 from http.server import ThreadingHTTPServer
 from unittest.mock import MagicMock, patch
@@ -198,6 +199,7 @@ def running_server(tmp_path, monkeypatch):
     monkeypatch.setattr(ui, "INSTALL_LOG", str(tmp_path / "install-log.jsonl"))
     monkeypatch.setattr(ui, "EVENTS_FILE", str(tmp_path / "events.jsonl"))
     monkeypatch.setattr(ui, "SERVICE_PATH", str(tmp_path / "nonexistent.service"))
+    monkeypatch.setattr(ui.settings, "CONFIG_FILE", str(tmp_path / "config.json"))
 
     server = ThreadingHTTPServer(("127.0.0.1", 0), ui.Handler)
     server.mode = "install"
@@ -320,3 +322,70 @@ class TestServerIntegration:
             assert mock_exit.called, "delayed_exit should fire after the shrunk delay"
         assert not pid_file.exists()
         assert not port_file.exists()
+
+    def test_get_settings_returns_defaults_when_unconfigured(self, running_server):
+        base, _ = running_server
+        with urllib.request.urlopen(f"{base}/api/settings") as r:
+            data = json.loads(r.read())
+        assert data == ui.settings.DEFAULTS
+
+    def test_post_settings_persists_and_is_reflected_by_get(self, running_server):
+        base, _ = running_server
+        payload = {
+            "conversion_mode": "separate_directory",
+            "output_directory": "/tmp/fixed-clips",
+            "allow_container_change": True,
+        }
+        req = urllib.request.Request(
+            f"{base}/api/settings", data=json.dumps(payload).encode(),
+            headers={"Content-Type": "application/json"}, method="POST",
+        )
+        with urllib.request.urlopen(req) as r:
+            posted = json.loads(r.read())
+        assert posted["ok"] is True
+        assert posted["conversion_mode"] == "separate_directory"
+
+        with urllib.request.urlopen(f"{base}/api/settings") as r:
+            data = json.loads(r.read())
+        assert data["conversion_mode"] == "separate_directory"
+        assert data["output_directory"] == "/tmp/fixed-clips"
+        assert data["allow_container_change"] is True
+
+    def test_post_settings_expands_leading_tilde_in_output_directory(self, running_server):
+        base, _ = running_server
+        payload = {"conversion_mode": "separate_directory", "output_directory": "~/fixed-clips",
+                   "allow_container_change": False}
+        req = urllib.request.Request(
+            f"{base}/api/settings", data=json.dumps(payload).encode(),
+            headers={"Content-Type": "application/json"}, method="POST",
+        )
+        with urllib.request.urlopen(req) as r:
+            posted = json.loads(r.read())
+        assert posted["output_directory"] == os.path.expanduser("~/fixed-clips")
+
+    def test_post_settings_rejects_invalid_conversion_mode(self, running_server):
+        base, _ = running_server
+        payload = {"conversion_mode": "delete_everything", "output_directory": "/tmp/x"}
+        req = urllib.request.Request(
+            f"{base}/api/settings", data=json.dumps(payload).encode(),
+            headers={"Content-Type": "application/json"}, method="POST",
+        )
+        try:
+            urllib.request.urlopen(req)
+            assert False, "should have raised HTTPError for the 400 response"
+        except urllib.error.HTTPError as e:
+            assert e.code == 400
+            assert json.loads(e.read())["ok"] is False
+
+    def test_post_settings_rejects_empty_output_directory(self, running_server):
+        base, _ = running_server
+        payload = {"conversion_mode": "separate_directory", "output_directory": "   "}
+        req = urllib.request.Request(
+            f"{base}/api/settings", data=json.dumps(payload).encode(),
+            headers={"Content-Type": "application/json"}, method="POST",
+        )
+        try:
+            urllib.request.urlopen(req)
+            assert False, "should have raised HTTPError for the 400 response"
+        except urllib.error.HTTPError as e:
+            assert e.code == 400

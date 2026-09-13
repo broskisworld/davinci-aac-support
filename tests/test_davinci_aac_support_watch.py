@@ -2,8 +2,8 @@
 
 Runs without DaVinci Resolve or real ffmpeg/ffprobe installed -- subprocess
 calls are mocked. Only the things that don't need a live Resolve connection
-are covered here (has_aac_audio, convert_in_place, write_status,
-process_clip's branching against a fake clip object).
+are covered here (has_aac_audio, convert_clip, write_status, process_clip's
+branching against a fake clip object).
 """
 import json
 import os
@@ -19,12 +19,14 @@ import davinci_aac_support_watch as watch  # noqa: E402
 
 @pytest.fixture(autouse=True)
 def reset_module_state(tmp_path, monkeypatch):
-    """Isolate each test: fresh status file, fresh in-memory caches."""
+    """Isolate each test: fresh status file, fresh in-memory caches, fresh
+    (default) settings -- never touches the real user config file."""
     watch._status_cache = {}
     watch._fixed_count = 0
     monkeypatch.setattr(watch, "STATUS_FILE", str(tmp_path / "status.json"))
     monkeypatch.setattr(watch, "EVENTS_FILE", str(tmp_path / "events.jsonl"))
     monkeypatch.setattr(watch, "NOTIFY", None)  # don't shell out to notify-send in tests
+    monkeypatch.setattr(watch.settings, "CONFIG_FILE", str(tmp_path / "config.json"))
     yield
 
 
@@ -60,23 +62,23 @@ class TestHasAacAudio:
             assert watch.has_aac_audio("/some/file.mov") is False
 
 
-class TestConvertInPlace:
+def _fake_ffmpeg_writing(content=b"converted"):
+    def fake_ffmpeg(cmd, **kwargs):
+        with open(cmd[-1], "wb") as f:
+            f.write(content)
+        r = MagicMock()
+        r.returncode = 0
+        return r
+    return fake_ffmpeg
+
+
+class TestConvertClip:
     def test_success_replaces_original_and_cleans_up_temp(self, tmp_path):
         src = tmp_path / "clip.mov"
         src.write_bytes(b"fake original bytes")
 
-        def fake_ffmpeg(cmd, **kwargs):
-            # ffmpeg's real job is "write real output to the temp path" --
-            # simulate that so the subsequent os.replace has something to swap in.
-            tmp_out = cmd[-1]
-            with open(tmp_out, "wb") as f:
-                f.write(b"fake converted bytes")
-            r = MagicMock()
-            r.returncode = 0
-            return r
-
-        with patch("subprocess.run", side_effect=fake_ffmpeg):
-            assert watch.convert_in_place(str(src)) is True
+        with patch("subprocess.run", side_effect=_fake_ffmpeg_writing(b"fake converted bytes")):
+            assert watch.convert_clip(str(src)) == str(src)
 
         assert src.read_bytes() == b"fake converted bytes"
         # no stray temp files left in the directory
@@ -91,31 +93,25 @@ class TestConvertInPlace:
         r.returncode = 1
         r.stderr = "ffmpeg blew up"
         with patch("subprocess.run", return_value=r):
-            assert watch.convert_in_place(str(src)) is False
+            assert watch.convert_clip(str(src)) is None
 
         assert src.read_bytes() == b"original bytes"
         leftovers = [p for p in tmp_path.iterdir() if p.name != "clip.mov"]
         assert leftovers == [], "temp file should be cleaned up on failure"
 
-    def test_maps_only_video_and_audio_not_every_stream(self, tmp_path):
+    def test_maps_only_video_and_audio_by_default_not_every_stream(self, tmp_path):
         # Regression: "-map 0" (every stream) fails on real files that carry
         # a data-only "tmcd" timecode track -- ffmpeg can't remux it into mp4
         # via stream copy once another stream is being re-encoded ("Could not
         # find tag for codec none in stream #2"), confirmed live. Only video
         # and audio are needed here, and "?" keeps files missing either from
-        # erroring.
+        # erroring. allow_container_change defaults to off, so this is the
+        # only path exercised unless a test explicitly turns it on.
         src = tmp_path / "clip.mov"
         src.write_bytes(b"original bytes")
 
-        def fake_ffmpeg(cmd, **kwargs):
-            with open(cmd[-1], "wb") as f:
-                f.write(b"converted")
-            r = MagicMock()
-            r.returncode = 0
-            return r
-
-        with patch("subprocess.run", side_effect=fake_ffmpeg) as run:
-            watch.convert_in_place(str(src))
+        with patch("subprocess.run", side_effect=_fake_ffmpeg_writing()) as run:
+            watch.convert_clip(str(src))
 
         cmd = run.call_args[0][0]
         assert "-map" in cmd
@@ -128,8 +124,137 @@ class TestConvertInPlace:
         src = tmp_path / "clip.mov"
         src.write_bytes(b"original bytes")
         with patch("tempfile.mkstemp", side_effect=OSError("Read-only file system")):
-            assert watch.convert_in_place(str(src)) is False
+            assert watch.convert_clip(str(src)) is None
         assert src.read_bytes() == b"original bytes"
+
+    def test_separate_directory_mode_leaves_original_untouched(self, tmp_path):
+        src = tmp_path / "src" / "clip.mov"
+        src.parent.mkdir()
+        src.write_bytes(b"original bytes")
+        out_dir = tmp_path / "fixed"
+        watch.settings.save_config({
+            "conversion_mode": watch.settings.MODE_SEPARATE_DIRECTORY,
+            "output_directory": str(out_dir),
+        })
+
+        with patch("subprocess.run", side_effect=_fake_ffmpeg_writing(b"converted bytes")):
+            new_path = watch.convert_clip(str(src))
+
+        assert src.read_bytes() == b"original bytes", "the original must never be touched in this mode"
+        assert os.path.dirname(new_path) == str(out_dir)
+        assert os.path.basename(new_path).startswith("clip-") and new_path.endswith(".mov")
+        with open(new_path, "rb") as f:
+            assert f.read() == b"converted bytes"
+
+    def test_separate_directory_mode_creates_directory_if_missing(self, tmp_path):
+        src = tmp_path / "clip.mov"
+        src.write_bytes(b"x")
+        out_dir = tmp_path / "does" / "not" / "exist" / "yet"
+        watch.settings.save_config({
+            "conversion_mode": watch.settings.MODE_SEPARATE_DIRECTORY,
+            "output_directory": str(out_dir),
+        })
+
+        with patch("subprocess.run", side_effect=_fake_ffmpeg_writing()):
+            new_path = watch.convert_clip(str(src))
+
+        assert os.path.isdir(out_dir)
+        assert os.path.dirname(new_path) == str(out_dir)
+
+    def test_separate_directory_mode_is_idempotent_across_reprocessing(self, tmp_path):
+        src = tmp_path / "clip.mov"
+        src.write_bytes(b"x")
+        out_dir = tmp_path / "fixed"
+        watch.settings.save_config({
+            "conversion_mode": watch.settings.MODE_SEPARATE_DIRECTORY,
+            "output_directory": str(out_dir),
+        })
+
+        with patch("subprocess.run", side_effect=_fake_ffmpeg_writing()):
+            path1 = watch.convert_clip(str(src))
+            path2 = watch.convert_clip(str(src))
+
+        assert path1 == path2, "reprocessing the same source should converge on the same output file"
+
+    def test_allow_container_change_off_never_probes_extra_streams(self, tmp_path):
+        src = tmp_path / "clip.mov"
+        src.write_bytes(b"x")
+        watch.settings.save_config({"allow_container_change": False})
+
+        with patch.object(watch, "get_non_av_stream_types") as probe, \
+             patch("subprocess.run", side_effect=_fake_ffmpeg_writing()):
+            watch.convert_clip(str(src))
+
+        probe.assert_not_called()
+
+    def test_allow_container_change_on_uses_full_preserve_when_extra_stream_present(self, tmp_path):
+        src = tmp_path / "clip.mov"
+        src.write_bytes(b"x")
+        watch.settings.save_config({"allow_container_change": True})
+
+        with patch.object(watch, "get_non_av_stream_types", return_value=["data"]), \
+             patch("subprocess.run", side_effect=_fake_ffmpeg_writing()) as run:
+            watch.convert_clip(str(src))
+
+        cmd = run.call_args[0][0]
+        assert "-f" in cmd and cmd[cmd.index("-f") + 1] == "mov"
+        assert cmd[cmd.index("-map") + 1] == "0", "must map every stream to keep the extra one"
+
+    def test_allow_container_change_on_but_no_extra_streams_uses_safe_default(self, tmp_path):
+        src = tmp_path / "clip.mov"
+        src.write_bytes(b"x")
+        watch.settings.save_config({"allow_container_change": True})
+
+        with patch.object(watch, "get_non_av_stream_types", return_value=[]), \
+             patch("subprocess.run", side_effect=_fake_ffmpeg_writing()) as run:
+            watch.convert_clip(str(src))
+
+        cmd = run.call_args[0][0]
+        assert "-f" not in cmd, "no extra stream to preserve -- no reason to change the container brand"
+
+    def test_full_preserve_attempt_falls_back_to_safe_default_on_failure(self, tmp_path):
+        src = tmp_path / "clip.mov"
+        src.write_bytes(b"original")
+        watch.settings.save_config({"allow_container_change": True})
+
+        calls = []
+
+        def fake_run(cmd, **kwargs):
+            calls.append(cmd)
+            r = MagicMock()
+            if "-f" in cmd:  # the full-preserve attempt: simulate it failing
+                r.returncode = 1
+                r.stderr = "muxer rejected it"
+            else:
+                r.returncode = 0
+                with open(cmd[-1], "wb") as f:
+                    f.write(b"converted")
+            return r
+
+        with patch.object(watch, "get_non_av_stream_types", return_value=["data"]), \
+             patch("subprocess.run", side_effect=fake_run):
+            result = watch.convert_clip(str(src))
+
+        assert result == str(src)
+        assert len(calls) == 2, "should try full-preserve first, then fall back -- not give up"
+        assert src.read_bytes() == b"converted"
+
+
+class TestHashedOutputPath:
+    def test_deterministic_for_same_source_path(self):
+        p1 = watch._hashed_output_path("/a/b/clip.mov", "/out")
+        p2 = watch._hashed_output_path("/a/b/clip.mov", "/out")
+        assert p1 == p2
+
+    def test_different_sources_with_same_basename_do_not_collide(self):
+        p1 = watch._hashed_output_path("/a/clip.mov", "/out")
+        p2 = watch._hashed_output_path("/b/clip.mov", "/out")
+        assert p1 != p2
+
+    def test_keeps_original_extension_and_output_directory(self):
+        p = watch._hashed_output_path("/a/b/clip.mov", "/out")
+        assert os.path.dirname(p) == "/out"
+        assert p.endswith(".mov")
 
 
 class TestWriteStatus:

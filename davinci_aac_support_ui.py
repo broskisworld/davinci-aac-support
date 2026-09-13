@@ -22,6 +22,8 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+import davinci_aac_support_config as settings
+
 BIN_DIR = os.path.expanduser("~/.local/bin")
 SERVICE_DIR = os.path.expanduser("~/.config/systemd/user")
 DAEMON_PATH = os.path.join(BIN_DIR, "davinci_aac_support_watch.py")
@@ -195,6 +197,21 @@ PAGE = """<!doctype html>
   .ask { background: rgba(224,185,95,0.08); border: 1px solid #5c4d2f; border-radius: 10px; padding: 16px; margin-top: 18px; }
   .ask p { margin: 0 0 12px; white-space: pre-wrap; }
   .hidden { display: none !important; }
+  .radio-row, .checkbox-row {
+    display: flex; align-items: flex-start; gap: 10px; padding: 8px 0; cursor: pointer; font-size: 0.92rem;
+  }
+  .radio-row input, .checkbox-row input { margin-top: 3px; accent-color: var(--accent); }
+  .hint { color: var(--muted); font-size: 0.85rem; display: block; }
+  input[type="text"] {
+    width: 100%; background: #0d1017; border: 1px solid var(--border); border-radius: 8px;
+    color: var(--text); padding: 9px 12px; font-family: inherit; font-size: 0.9rem;
+  }
+  input[type="text"]:focus { outline: none; border-color: var(--accent-dim); }
+  .setting-info {
+    font-size: 0.85rem; color: var(--muted); background: rgba(255,255,255,0.03);
+    border-radius: 8px; padding: 10px 12px; margin: 14px 0 0;
+  }
+  #settings-saved { color: var(--accent); font-size: 0.9rem; align-self: center; }
   .spinner {
     width: 14px; height: 14px; border-radius: 50%; border: 2px solid var(--border);
     border-top-color: var(--accent); animation: spin 0.7s linear infinite; display: inline-block;
@@ -218,6 +235,30 @@ PAGE = """<!doctype html>
     </div>
     <div class="kv" id="status-kv"></div>
     <div class="btns" id="status-btns"></div>
+  </div>
+
+  <div class="card" id="settings-card">
+    <div class="row"><strong>Settings</strong></div>
+    <label class="radio-row">
+      <input type="radio" name="mode" value="in_place" id="mode-in-place">
+      <span>Convert in place<span class="hint">Overwrites the original file. No extra disk space used.</span></span>
+    </label>
+    <label class="radio-row">
+      <input type="radio" name="mode" value="separate_directory" id="mode-separate">
+      <span>Save fixed copies to a separate folder<span class="hint">Original file is never touched or modified.</span></span>
+    </label>
+    <div id="output-dir-row" class="hidden" style="margin-top:6px; margin-left:26px">
+      <input type="text" id="output-dir-input" placeholder="/home/you/DaVinciAacSupportFixed">
+    </div>
+    <label class="checkbox-row" style="margin-top:6px">
+      <input type="checkbox" id="container-change-input">
+      <span>Preserve extra streams (timecode, GPS/telemetry) when possible<span class="hint">Some camera files carry a stream that can only be kept by changing the file's container format.</span></span>
+    </label>
+    <p class="setting-info" id="settings-info"></p>
+    <div class="btns">
+      <button class="btn primary" id="settings-save">Save settings</button>
+      <span id="settings-saved" class="hidden">Saved</span>
+    </div>
   </div>
 
   <div class="ask hidden" id="ask-card">
@@ -333,8 +374,50 @@ function streamEvents() {
   };
 }
 
+function settingsFromForm() {
+  return {
+    conversion_mode: document.querySelector('input[name="mode"]:checked').value,
+    output_directory: document.getElementById('output-dir-input').value,
+    allow_container_change: document.getElementById('container-change-input').checked,
+  };
+}
+
+function renderSettings(s) {
+  document.getElementById(s.conversion_mode === 'separate_directory' ? 'mode-separate' : 'mode-in-place').checked = true;
+  document.getElementById('output-dir-input').value = s.output_directory;
+  document.getElementById('container-change-input').checked = !!s.allow_container_change;
+  document.getElementById('output-dir-row').classList.toggle('hidden', s.conversion_mode !== 'separate_directory');
+
+  const info = document.getElementById('settings-info');
+  if (s.conversion_mode === 'separate_directory') {
+    info.textContent = 'The original file is never modified in this mode -- it stays wherever it already is.';
+  } else if (s.allow_container_change) {
+    info.textContent = "Extra streams are kept when possible. This can change the file's container format (still opens normally everywhere).";
+  } else {
+    info.textContent = 'Video and audio are always kept. A file with an extra stream (timecode, GPS/telemetry -- common on drone/action-cam footage) will have that stream dropped.';
+  }
+}
+
+function loadSettings() {
+  fetch('/api/settings').then(r => r.json()).then(renderSettings);
+}
+
+document.querySelectorAll('input[name="mode"]').forEach(r => r.addEventListener('change', () => renderSettings(settingsFromForm())));
+document.getElementById('container-change-input').addEventListener('change', () => renderSettings(settingsFromForm()));
+
+document.getElementById('settings-save').onclick = () => {
+  fetch('/api/settings', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(settingsFromForm())})
+    .then(r => r.json()).then(s => {
+      renderSettings(s);
+      const saved = document.getElementById('settings-saved');
+      saved.classList.remove('hidden');
+      setTimeout(() => saved.classList.add('hidden'), 1500);
+    });
+};
+
 refreshStatus();
 streamEvents();
+loadSettings();
 setInterval(refreshStatus, 4000);
 </script>
 </body>
@@ -378,6 +461,8 @@ class Handler(BaseHTTPRequestHandler):
             })
         elif path == "/api/events":
             self._stream_events()
+        elif path == "/api/settings":
+            self._json(settings.load_config())
         else:
             self.send_response(404)
             self.end_headers()
@@ -402,9 +487,26 @@ class Handler(BaseHTTPRequestHandler):
             action = body.get("action")
             result = self._do_action(action)
             self._json(result)
+        elif self.path == "/api/settings":
+            result = self._save_settings(body)
+            self._json(result, 200 if result.get("ok") else 400)
         else:
             self.send_response(404)
             self.end_headers()
+
+    def _save_settings(self, body):
+        mode = body.get("conversion_mode")
+        if mode not in (settings.MODE_IN_PLACE, settings.MODE_SEPARATE_DIRECTORY):
+            return {"ok": False, "error": "invalid conversion_mode"}
+        output_directory = body.get("output_directory")
+        if not isinstance(output_directory, str) or not output_directory.strip():
+            return {"ok": False, "error": "output_directory must be a non-empty path"}
+        updated = settings.save_config({
+            "conversion_mode": mode,
+            "output_directory": os.path.expanduser(output_directory.strip()),
+            "allow_container_change": bool(body.get("allow_container_change")),
+        })
+        return {"ok": True, **updated}
 
     def _do_action(self, action):
         if action == "restart":

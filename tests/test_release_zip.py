@@ -17,6 +17,7 @@ PACKAGED_FILES = [
     "install.sh",
     "davinci_aac_support_watch.py",
     "davinci_aac_support_ui.py",
+    "davinci_aac_support_config.py",
     "davinci-aac-support.desktop",
     "README.md",
     "LICENSE",
