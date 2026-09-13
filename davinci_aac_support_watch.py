@@ -133,8 +133,15 @@ def convert_in_place(path):
     log(f"  converting in place: {path}")
     t0 = time.time()
     result = subprocess.run(
-        ["ffmpeg", "-y", "-i", path, "-map", "0",
-         "-c", "copy", "-c:a", "pcm_s16le", tmp_path],
+        # Only video/audio streams are mapped (not "-map 0", every stream):
+        # some cameras embed a data-only "tmcd" timecode track that ffmpeg
+        # can't remux into mp4 via stream copy once another stream in the
+        # file is being re-encoded ("Could not find tag for codec none in
+        # stream #2" -- confirmed live against a real failing file). Video
+        # and audio are all DaVinci Resolve needs here; the "?" suffix
+        # keeps this from erroring on files missing one or the other.
+        ["ffmpeg", "-y", "-i", path, "-map", "0:v?", "-map", "0:a?",
+         "-c:v", "copy", "-c:a", "pcm_s16le", tmp_path],
         capture_output=True, text=True,
     )
     if result.returncode != 0:
@@ -151,7 +158,7 @@ def process_clip(clip):
     global _fixed_count
     uid = clip.GetUniqueId()
     status = _status_cache.get(uid)
-    if status in ("clean", "fixed"):
+    if status in ("clean", "fixed", "failed"):
         return
 
     path = clip.GetClipProperty("File Path")
@@ -170,6 +177,11 @@ def process_clip(clip):
     if not convert_in_place(path):
         notify("AAC Support failed", name)
         emit_event("failed", f"Conversion failed: {name}")
+        # Without this, a clip that fails once gets retried (and re-fires
+        # this same notification) every poll interval forever -- confirmed
+        # live as a real notification-spam bug, independent of whatever
+        # caused the conversion itself to fail.
+        _status_cache[uid] = "failed"
         return
 
     # Same path in and out -- ReplaceClip still forces Resolve to re-read
@@ -187,6 +199,7 @@ def process_clip(clip):
         log(f"  ReplaceClip FAILED for {name}")
         notify("AAC Support failed", f"ReplaceClip rejected {name}")
         emit_event("failed", f"Resolve rejected the refresh: {name}")
+        _status_cache[uid] = "failed"
 
 
 def walk_folder(folder, depth=0):

@@ -97,6 +97,33 @@ class TestConvertInPlace:
         leftovers = [p for p in tmp_path.iterdir() if p.name != "clip.mov"]
         assert leftovers == [], "temp file should be cleaned up on failure"
 
+    def test_maps_only_video_and_audio_not_every_stream(self, tmp_path):
+        # Regression: "-map 0" (every stream) fails on real files that carry
+        # a data-only "tmcd" timecode track -- ffmpeg can't remux it into mp4
+        # via stream copy once another stream is being re-encoded ("Could not
+        # find tag for codec none in stream #2"), confirmed live. Only video
+        # and audio are needed here, and "?" keeps files missing either from
+        # erroring.
+        src = tmp_path / "clip.mov"
+        src.write_bytes(b"original bytes")
+
+        def fake_ffmpeg(cmd, **kwargs):
+            with open(cmd[-1], "wb") as f:
+                f.write(b"converted")
+            r = MagicMock()
+            r.returncode = 0
+            return r
+
+        with patch("subprocess.run", side_effect=fake_ffmpeg) as run:
+            watch.convert_in_place(str(src))
+
+        cmd = run.call_args[0][0]
+        assert "-map" in cmd
+        assert cmd[cmd.index("-map") + 1] == "0:v?"
+        assert cmd.count("-map") == 2 and "0:a?" in cmd, "must map audio too, not just video"
+        assert "0" not in [cmd[i + 1] for i, a in enumerate(cmd) if a == "-map"], \
+            "must not blanket-map every stream ('-map 0') -- that's what let the tmcd bug back in"
+
     def test_readonly_directory_fails_gracefully(self, tmp_path):
         src = tmp_path / "clip.mov"
         src.write_bytes(b"original bytes")
@@ -180,7 +207,7 @@ class TestProcessClip:
         assert watch._fixed_count == 1
         assert src.read_bytes() == b"converted"
 
-    def test_replace_clip_failure_is_not_cached_as_fixed(self, tmp_path):
+    def test_replace_clip_failure_is_cached_as_failed_not_fixed(self, tmp_path):
         src = tmp_path / "aac.mov"
         src.write_bytes(b"original")
         clip = _fake_clip("uid-3", str(src), replace_clip_result=False)
@@ -198,8 +225,36 @@ class TestProcessClip:
         with patch("subprocess.run", side_effect=fake_run):
             watch.process_clip(clip)
 
-        assert "uid-3" not in watch._status_cache, "should retry on next poll, not get stuck"
+        assert watch._status_cache["uid-3"] == "failed"
         assert watch._fixed_count == 0
+
+    def test_failed_clip_is_not_retried_or_re_notified_every_poll(self, tmp_path):
+        # Regression: previously neither failure branch cached anything, so
+        # a clip that failed once got retried -- and re-fired the "AAC
+        # Support failed" notification -- every single poll interval
+        # forever. Confirmed live as a real notification-spam bug against a
+        # file with a permanently-failing conversion.
+        src = tmp_path / "aac.mov"
+        src.write_bytes(b"original")
+        clip = _fake_clip("uid-6", str(src))
+
+        r = MagicMock()
+        r.returncode = 1
+        r.stderr = "ffmpeg blew up"
+
+        def fake_run(cmd, **kwargs):
+            if cmd[0] == "ffprobe":
+                return _ffprobe_result("aac\n")
+            return r
+
+        notify_calls = []
+        with patch("subprocess.run", side_effect=fake_run), \
+             patch.object(watch, "notify", side_effect=lambda *a: notify_calls.append(a)):
+            watch.process_clip(clip)
+            watch.process_clip(clip)  # second poll should short-circuit
+
+        assert watch._status_cache["uid-6"] == "failed"
+        assert len(notify_calls) == 1, "should only notify once per clip, not every poll"
 
     def test_missing_file_is_skipped_silently(self):
         clip = _fake_clip("uid-4", "/does/not/exist.mov")
