@@ -42,8 +42,17 @@
 set -euo pipefail
 
 usage() {
-    sed -n '2,/^set -euo pipefail$/p' "${BASH_SOURCE[0]}" | sed '$d' | sed -E 's/^#//; s/^ //'
+    # Under "curl | bash" there is no script file to read the header from.
+    local self="${BASH_SOURCE[0]:-}"
+    if [[ -f "$self" ]]; then
+        sed -n '2,/^set -euo pipefail$/p' "$self" | sed '$d' | sed -E 's/^#//; s/^ //'
+    else
+        echo "Usage: install.sh [--status | --uninstall | -h]"
+        echo "See: $GITHUB_RAW_BASE/README.md"
+    fi
 }
+
+GITHUB_RAW_BASE="https://raw.githubusercontent.com/broskisworld/davinci-aac-support/main"
 
 ACTION="install"
 case "${1:-}" in
@@ -54,8 +63,12 @@ case "${1:-}" in
     *) echo "Unknown argument: $1" >&2; usage >&2; exit 1 ;;
 esac
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-GITHUB_RAW_BASE="https://raw.githubusercontent.com/broskisworld/davinci-aac-support/main"
+# Under "curl | bash" the script is read from stdin, so BASH_SOURCE is unset
+# and, with "set -u" above, referencing it aborts the whole install
+# ("BASH_SOURCE[0]: unbound variable"). Fall back to $0 ("bash" there), which
+# resolves to the current directory; the sibling-file lookups below then miss
+# and every file gets fetched from GitHub instead, as intended.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
 
 BIN_DIR="$HOME/.local/bin"
 SERVICE_DIR="$HOME/.config/systemd/user"
@@ -93,6 +106,19 @@ self_uninstall_hint() {
         echo "$SELF --uninstall"
     else
         echo "systemctl --user disable --now $SERVICE_NAME && rm -f $DAEMON_PATH $SERVICE_PATH && systemctl --user daemon-reload"
+    fi
+}
+
+# Reads a yes/no style answer. Under "curl | bash" stdin is the script
+# itself, so a plain `read` would swallow the next lines of this file as the
+# user's answer; ask the terminal directly in that case. With no terminal at
+# all (nothing to ask), REPLY stays empty so each caller's default applies.
+prompt_read() {  # $1=prompt text; answer lands in REPLY
+    REPLY=""
+    if [[ -t 0 ]]; then
+        read -rp "$1" REPLY
+    else
+        read -rp "$1" REPLY </dev/tty 2>/dev/null || REPLY=""
     fi
 }
 
@@ -249,7 +275,7 @@ check_deps() {
     else
         warn "ffmpeg not found -- attempting to install it"
         echo "  Will run: sudo bash -c \"$inner_cmd\""
-        read -rp "  Proceed? [Y/n] " REPLY
+        prompt_read "  Proceed? [Y/n] "
         if [[ "$REPLY" =~ ^[Nn]$ ]]; then
             ui_fail "ffmpeg is required. Aborting."
         fi
@@ -529,7 +555,7 @@ PYSTATUS
 
 do_uninstall() {
     step "Uninstalling DaVinci AAC Support"
-    read -rp "  Remove the service and installed files? [y/N] " REPLY
+    prompt_read "  Remove the service and installed files? [y/N] "
     if [[ ! "$REPLY" =~ ^[Yy]$ ]]; then
         echo "  Cancelled."
         exit 0
