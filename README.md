@@ -9,7 +9,7 @@ within a few seconds of import. No manual conversion, no re-importing.
 
 [![tests](https://github.com/broskisworld/davinci-aac-support/actions/workflows/tests.yml/badge.svg)](https://github.com/broskisworld/davinci-aac-support/actions/workflows/tests.yml)
 
-**[→ davinci-aac-support.0thdraft.com](https://davinci-aac-support.0thdraft.com)** — same explanation, prettier page.
+**[→ davinci-aac-support.0thdraft.com](https://davinci-aac-support.0thdraft.com)** — download and full walkthrough, prettier page.
 
 ---
 
@@ -80,6 +80,8 @@ directory** mode — the original file is untouched regardless of this setting.
 ---
 
 ## Install
+
+**[→ davinci-aac-support.0thdraft.com](https://davinci-aac-support.0thdraft.com#install)** has the same downloads below, with screenshots.
 
 ### Option A — `.deb` (Debian, Ubuntu, Mint, and other apt-based distros)
 
